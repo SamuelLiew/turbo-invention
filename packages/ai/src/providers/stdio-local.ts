@@ -18,7 +18,7 @@ export interface StdioLocalProviderOptions {
 }
 
 export function stdioLocalProvider(options: StdioLocalProviderOptions = {}): Provider<"stdio-openai"> {
-	const command = options.command ?? "llama-cli";
+	const command = options.command ?? "python3";
 	const modelId = options.modelId ?? "local-llm";
 
 	const model: Model<"stdio-openai"> = {

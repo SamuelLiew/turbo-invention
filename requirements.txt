@@ -1,0 +1,5 @@
+mlx>=0.20.0
+mlx-lm>=0.20.0
+mlx-embeddings>=0.0.3
+numpy>=1.26.0
+kagglehub>=0.3.0
