@@ -9,13 +9,13 @@
  * Do NOT restore auto-discovery of extensions or HTTP-based skills.
  */
 
-import { stdioLocalProvider } from "./stdio-local.ts";
 import type { ProviderRegistry } from "../models.ts";
+import { stdioLocalProvider } from "./stdio-local.ts";
 
 export function registerBuiltins(registry: ProviderRegistry): void {
-    // Local MLX provider — zero external network surface
-    registry.register(stdioLocalProvider());
+	// Local MLX provider — zero external network surface
+	registry.register(stdioLocalProvider());
 
-    // NOTE: If you add other local providers (e.g., llama.cpp via stdio),
-    // ensure they also use stdio-local and do not open HTTP ports.
+	// NOTE: If you add other local providers (e.g., llama.cpp via stdio),
+	// ensure they also use stdio-local and do not open HTTP ports.
 }

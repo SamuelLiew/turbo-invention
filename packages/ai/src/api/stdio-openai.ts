@@ -242,7 +242,7 @@ function buildTools(context: Context): OpenAITool[] | undefined {
 }
 
 export function stream(
-	model: Model<"stdio-openai"> | Model,
+	model: Model<"stdio-openai"> | Model<any>,
 	context: Context,
 	options?: StdioOpenAIOptions,
 ): AssistantMessageEventStream {
@@ -591,7 +591,7 @@ export function stream(
 
 	// FIX: Guard stdin.write against EPIPE and other write errors
 	if (child.stdin) {
-		const payloadLine = JSON.stringify(payload) + "\n";
+		const payloadLine = `${JSON.stringify(payload)}\n`;
 		armHangTimeout();
 		const ok = child.stdin.write(payloadLine, (err) => {
 			if (err && !isDone) {
@@ -616,7 +616,7 @@ export function stream(
 }
 
 export function streamSimple(
-	model: Model<"stdio-openai"> | Model,
+	model: Model<"stdio-openai"> | Model<any>,
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {

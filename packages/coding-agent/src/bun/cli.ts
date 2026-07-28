@@ -11,5 +11,4 @@ import { restoreSandboxEnv } from "./restore-sandbox-env.ts";
 
 restoreSandboxEnv();
 
-await import("./register-bedrock.ts");
 await import("../cli.ts");

@@ -162,25 +162,5 @@ export function getEnvApiKey(provider: string, env?: ProviderEnv): string | unde
 		}
 	}
 
-	if (provider === "amazon-bedrock") {
-		// Amazon Bedrock supports multiple credential sources:
-		// 1. AWS_PROFILE - named profile from ~/.aws/credentials
-		// 2. AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY - standard IAM keys
-		// 3. AWS_BEARER_TOKEN_BEDROCK - Bedrock bearer token
-		// 4. AWS_CONTAINER_CREDENTIALS_RELATIVE_URI - ECS task roles
-		// 5. AWS_CONTAINER_CREDENTIALS_FULL_URI - ECS task roles (full URI)
-		// 6. AWS_WEB_IDENTITY_TOKEN_FILE - IRSA (IAM Roles for Service Accounts)
-		if (
-			getProviderEnvValue("AWS_PROFILE", env) ||
-			(getProviderEnvValue("AWS_ACCESS_KEY_ID", env) && getProviderEnvValue("AWS_SECRET_ACCESS_KEY", env)) ||
-			getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", env) ||
-			getProviderEnvValue("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", env) ||
-			getProviderEnvValue("AWS_CONTAINER_CREDENTIALS_FULL_URI", env) ||
-			getProviderEnvValue("AWS_WEB_IDENTITY_TOKEN_FILE", env)
-		) {
-			return "<authenticated>";
-		}
-	}
-
 	return undefined;
 }
