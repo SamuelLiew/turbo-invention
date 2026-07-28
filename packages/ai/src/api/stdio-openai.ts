@@ -42,32 +42,51 @@ interface OpenAITool {
 	};
 }
 
-const activeProcesses = new Map<string, ChildProcess>();
+const BUSY_FLAG = Symbol("stdio_process_busy");
 
-function getOrSpawnChild(command: string, args: string[]): ChildProcess {
+interface ManagedChildProcess extends ChildProcess {
+	[BUSY_FLAG]?: boolean;
+}
+
+const activeProcesses = new Map<string, ManagedChildProcess>();
+
+function getOrSpawnChild(command: string, args: string[]): ManagedChildProcess {
 	const key = `${command} ${args.join(" ")}`;
 	let child = activeProcesses.get(key);
 
 	if (child && !child.killed && child.exitCode === null && child.stdin && !child.stdin.destroyed) {
-		return child;
+		if (child[BUSY_FLAG]) {
+			try {
+				child.kill();
+			} catch {
+				// Ignore kill errors for stale process
+			}
+			activeProcesses.delete(key);
+			child = undefined;
+		} else {
+			return child;
+		}
 	}
 
-	child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+	const newChild = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] }) as ManagedChildProcess;
+	newChild[BUSY_FLAG] = false;
 
-	child.on("exit", () => {
-		if (activeProcesses.get(key) === child) {
+	newChild.on("exit", () => {
+		if (activeProcesses.get(key) === newChild) {
 			activeProcesses.delete(key);
 		}
+		newChild[BUSY_FLAG] = false;
 	});
 
-	child.on("error", () => {
-		if (activeProcesses.get(key) === child) {
+	newChild.on("error", () => {
+		if (activeProcesses.get(key) === newChild) {
 			activeProcesses.delete(key);
 		}
+		newChild[BUSY_FLAG] = false;
 	});
 
-	activeProcesses.set(key, child);
-	return child;
+	activeProcesses.set(key, newChild);
+	return newChild;
 }
 
 function buildMessages(context: Context): OpenAIChatMessage[] {
@@ -177,7 +196,7 @@ export function stream(
 
 	es.push({ type: "start", partial: assistantMessage });
 
-	let child: ChildProcess;
+	let child: ManagedChildProcess;
 	try {
 		child = getOrSpawnChild(command, args);
 	} catch (err) {
@@ -188,12 +207,15 @@ export function stream(
 		return es;
 	}
 
+	child[BUSY_FLAG] = true;
+
 	let stdoutBuffer = "";
 	let stderrBuffer = "";
 	let textIndex = -1;
 	let isDone = false;
 
 	const cleanupListeners = () => {
+		child[BUSY_FLAG] = false;
 		if (child.stdout) {
 			child.stdout.removeListener("data", onStdoutData);
 		}
