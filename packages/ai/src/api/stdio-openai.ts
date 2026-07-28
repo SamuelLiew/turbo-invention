@@ -13,9 +13,9 @@ import type {
 import { type AssistantMessageEventStream, createAssistantMessageEventStream } from "../utils/event-stream.ts";
 
 export interface StdioOpenAIOptions extends StreamOptions {
-	/** Command to spawn the model process. Defaults to `model.baseUrl` or `"llama-cli"`. */
+	/** Command to spawn the model process. Defaults to `"python3"`. */
 	command?: string;
-	/** Extra arguments to pass to the spawned process. */
+	/** Extra arguments to pass to the spawned process. Defaults to `["scripts/mlx_engine.py"]`. */
 	args?: string[];
 }
 
@@ -42,7 +42,7 @@ interface OpenAITool {
 	};
 }
 
-function buildOpenAIRequest(model: Model, context: Context, options: StreamOptions) {
+function buildMessages(context: Context): OpenAIChatMessage[] {
 	const messages: OpenAIChatMessage[] = [];
 
 	if (context.systemPrompt) {
@@ -63,6 +63,8 @@ function buildOpenAIRequest(model: Model, context: Context, options: StreamOptio
 			for (const c of m.content) {
 				if (c.type === "text") {
 					textParts.push(c.text);
+				} else if (c.type === "thinking") {
+					textParts.push(`<thinking>${c.thinking}</thinking>`);
 				} else if (c.type === "toolCall") {
 					toolCalls.push({
 						id: c.id,
@@ -81,7 +83,7 @@ function buildOpenAIRequest(model: Model, context: Context, options: StreamOptio
 				...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
 			});
 		} else if (m.role === "toolResult") {
-			const contentStr = m.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
+			const contentStr = m.content.map((c) => (c.type === "text" ? c.text : "")).join("");
 			messages.push({
 				role: "tool",
 				tool_call_id: m.toolCallId,
@@ -90,7 +92,12 @@ function buildOpenAIRequest(model: Model, context: Context, options: StreamOptio
 		}
 	}
 
-	const tools: OpenAITool[] | undefined = context.tools?.map((t) => ({
+	return messages;
+}
+
+function buildTools(context: Context): OpenAITool[] | undefined {
+	if (!context.tools?.length) return undefined;
+	return context.tools.map((t) => ({
 		type: "function",
 		function: {
 			name: t.name,
@@ -98,22 +105,6 @@ function buildOpenAIRequest(model: Model, context: Context, options: StreamOptio
 			parameters: t.parameters as Record<string, unknown> | undefined,
 		},
 	}));
-
-	return {
-		model: model.id,
-		messages,
-		...(tools && tools.length > 0 ? { tools } : {}),
-		temperature: options.temperature ?? 0.7,
-		max_tokens: options.maxTokens ?? model.maxTokens,
-		stream: true,
-	};
-}
-
-interface PendingToolCall {
-	id: string;
-	name: string;
-	argumentsBuffer: string;
-	contentIndex: number;
 }
 
 export function stream(
@@ -122,11 +113,20 @@ export function stream(
 	options?: StdioOpenAIOptions,
 ): AssistantMessageEventStream {
 	const es = createAssistantMessageEventStream();
-	const payload = buildOpenAIRequest(model, context, options ?? {});
 
-	const command =
-		options?.command ?? (model.baseUrl && !model.baseUrl.startsWith("http") ? model.baseUrl : "llama-cli");
-	const args = options?.args ?? [];
+	const messages = buildMessages(context);
+	const tools = buildTools(context);
+	const payload = {
+		model: model.id,
+		messages,
+		...(tools && tools.length > 0 ? { tools } : {}),
+		temperature: options?.temperature ?? 0.7,
+		max_tokens: options?.maxTokens ?? model.maxTokens ?? 8192,
+		stream: true,
+	};
+
+	const command = options?.command ?? (model.baseUrl && !model.baseUrl.startsWith("http") ? model.baseUrl : "python3");
+	const args = options?.args ?? (command === "python3" ? ["scripts/mlx_engine.py"] : []);
 
 	const assistantMessage: AssistantMessage = {
 		role: "assistant",
@@ -181,7 +181,7 @@ export function stream(
 
 	let stdoutBuffer = "";
 	let stderrBuffer = "";
-	const pendingToolCalls = new Map<number, PendingToolCall>();
+	let textIndex = -1;
 	let isDone = false;
 
 	const finishStream = (reason: Extract<StopReason, "stop" | "length" | "toolUse">) => {
@@ -192,39 +192,15 @@ export function stream(
 			options.signal.removeEventListener("abort", onAbort);
 		}
 
-		// Finalize any text block
-		const textIdx = assistantMessage.content.findIndex((c) => c.type === "text");
-		if (textIdx !== -1) {
-			const textContent = assistantMessage.content[textIdx] as TextContent;
-			es.push({ type: "text_end", contentIndex: textIdx, content: textContent.text, partial: assistantMessage });
+		if (textIndex >= 0) {
+			const content = assistantMessage.content[textIndex] as TextContent;
+			es.push({ type: "text_end", contentIndex: textIndex, content: content.text, partial: assistantMessage });
+			textIndex = -1;
 		}
 
-		// Finalize tool calls
-		for (const [, pending] of pendingToolCalls) {
-			let parsedArgs: Record<string, unknown> = {};
-			try {
-				parsedArgs = JSON.parse(pending.argumentsBuffer || "{}") as Record<string, unknown>;
-			} catch {
-				parsedArgs = { raw: pending.argumentsBuffer };
-			}
+		const hasToolCalls = assistantMessage.content.some((c) => c.type === "toolCall");
+		assistantMessage.stopReason = hasToolCalls ? "toolUse" : reason;
 
-			const toolCall: ToolCall = {
-				type: "toolCall",
-				id: pending.id,
-				name: pending.name,
-				arguments: parsedArgs,
-			};
-
-			assistantMessage.content[pending.contentIndex] = toolCall;
-			es.push({
-				type: "toolcall_end",
-				contentIndex: pending.contentIndex,
-				toolCall,
-				partial: assistantMessage,
-			});
-		}
-
-		assistantMessage.stopReason = pendingToolCalls.size > 0 ? "toolUse" : reason;
 		es.push({
 			type: "done",
 			reason: assistantMessage.stopReason as Extract<StopReason, "stop" | "length" | "toolUse">,
@@ -242,17 +218,24 @@ export function stream(
 		stdoutBuffer = lines.pop() ?? "";
 
 		for (const rawLine of lines) {
-			const line = rawLine.trim();
-			if (!line || !line.startsWith("data: ")) continue;
-
-			const data = line.slice(6).trim();
-			if (data === "[DONE]") {
+			let line = rawLine.trim();
+			if (!line) continue;
+			if (line.startsWith("data: ")) {
+				line = line.slice(6).trim();
+			}
+			if (line === "[DONE]") {
 				finishStream("stop");
 				return;
 			}
 
 			try {
-				const parsed = JSON.parse(data) as {
+				const event = JSON.parse(line) as {
+					type?: string;
+					text?: string;
+					id?: string;
+					name?: string;
+					arguments?: string | Record<string, unknown>;
+					error?: string;
 					choices?: Array<{
 						delta?: {
 							content?: string | null;
@@ -269,133 +252,102 @@ export function stream(
 						};
 						finish_reason?: string | null;
 					}>;
-					usage?: {
-						prompt_tokens?: number;
-						completion_tokens?: number;
-						total_tokens?: number;
-					};
 				};
 
-				if (parsed.usage) {
-					const input = parsed.usage.prompt_tokens ?? 0;
-					const output = parsed.usage.completion_tokens ?? 0;
-					const totalTokens = parsed.usage.total_tokens ?? input + output;
-					const inputCost = (input / 1000) * (model.cost.input ?? 0);
-					const outputCost = (output / 1000) * (model.cost.output ?? 0);
-
-					assistantMessage.usage = {
-						input,
-						output,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens,
-						cost: {
-							input: inputCost,
-							output: outputCost,
-							cacheRead: 0,
-							cacheWrite: 0,
-							total: inputCost + outputCost,
-						},
-					};
+				// Handle NDJSON stream protocol (from mlx_engine.py)
+				if (event.type === "done") {
+					finishStream("stop");
+					return;
 				}
 
-				const choice = parsed.choices?.[0];
-				if (!choice) continue;
-
-				const delta = choice.delta;
-
-				// Handle thinking / reasoning delta
-				const thinkingText = delta?.reasoning_content ?? delta?.thinking;
-				if (thinkingText) {
-					let thinkIdx = assistantMessage.content.findIndex((c) => c.type === "thinking");
-					if (thinkIdx === -1) {
-						assistantMessage.content.push({ type: "thinking", thinking: thinkingText });
-						thinkIdx = assistantMessage.content.length - 1;
-						es.push({ type: "thinking_start", contentIndex: thinkIdx, partial: assistantMessage });
-					} else {
-						(assistantMessage.content[thinkIdx] as ThinkingContent).thinking += thinkingText;
+				if (event.type === "error") {
+					isDone = true;
+					if (options?.signal) {
+						options.signal.removeEventListener("abort", onAbort);
 					}
-					es.push({
-						type: "thinking_delta",
-						contentIndex: thinkIdx,
-						delta: thinkingText,
-						partial: assistantMessage,
-					});
+					assistantMessage.stopReason = "error";
+					assistantMessage.errorMessage = event.error ?? "Unknown model error";
+					es.push({ type: "error", reason: "error", error: assistantMessage });
+					es.end(assistantMessage);
+					return;
 				}
 
-				// Handle text delta
-				if (delta?.content) {
-					let textIdx = assistantMessage.content.findIndex((c) => c.type === "text");
-					if (textIdx === -1) {
-						assistantMessage.content.push({ type: "text", text: delta.content });
-						textIdx = assistantMessage.content.length - 1;
-						es.push({ type: "text_start", contentIndex: textIdx, partial: assistantMessage });
-					} else {
-						(assistantMessage.content[textIdx] as TextContent).text += delta.content;
+				if (event.type === "text" && event.text) {
+					if (textIndex === -1) {
+						textIndex = assistantMessage.content.length;
+						assistantMessage.content.push({ type: "text", text: "" });
+						es.push({ type: "text_start", contentIndex: textIndex, partial: assistantMessage });
 					}
+					(assistantMessage.content[textIndex] as TextContent).text += event.text;
 					es.push({
 						type: "text_delta",
-						contentIndex: textIdx,
-						delta: delta.content,
+						contentIndex: textIndex,
+						delta: event.text,
+						partial: assistantMessage,
+					});
+					continue;
+				}
+
+				if (event.type === "tool_call" && event.name) {
+					if (textIndex >= 0) {
+						const textContent = assistantMessage.content[textIndex] as TextContent;
+						es.push({
+							type: "text_end",
+							contentIndex: textIndex,
+							content: textContent.text,
+							partial: assistantMessage,
+						});
+						textIndex = -1;
+					}
+
+					let parsedArgs: Record<string, unknown> = {};
+					if (typeof event.arguments === "string") {
+						try {
+							parsedArgs = JSON.parse(event.arguments) as Record<string, unknown>;
+						} catch {
+							parsedArgs = { raw: event.arguments };
+						}
+					} else if (typeof event.arguments === "object" && event.arguments !== null) {
+						parsedArgs = event.arguments;
+					}
+
+					const toolCall: ToolCall = {
+						type: "toolCall",
+						id: event.id ?? `call_${assistantMessage.content.length}`,
+						name: event.name,
+						arguments: parsedArgs,
+					};
+
+					const tcIndex = assistantMessage.content.length;
+					assistantMessage.content.push(toolCall);
+					es.push({ type: "toolcall_start", contentIndex: tcIndex, partial: assistantMessage });
+					es.push({ type: "toolcall_end", contentIndex: tcIndex, toolCall, partial: assistantMessage });
+					continue;
+				}
+
+				// Fallback handle standard OpenAI delta formats
+				const choice = event.choices?.[0];
+				if (choice?.delta?.content) {
+					if (textIndex === -1) {
+						textIndex = assistantMessage.content.length;
+						assistantMessage.content.push({ type: "text", text: "" });
+						es.push({ type: "text_start", contentIndex: textIndex, partial: assistantMessage });
+					}
+					(assistantMessage.content[textIndex] as TextContent).text += choice.delta.content;
+					es.push({
+						type: "text_delta",
+						contentIndex: textIndex,
+						delta: choice.delta.content,
 						partial: assistantMessage,
 					});
 				}
 
-				// Handle tool call deltas
-				if (delta?.tool_calls) {
-					for (const tc of delta.tool_calls) {
-						const index = tc.index;
-						let pending = pendingToolCalls.get(index);
-
-						if (!pending) {
-							const contentIndex = assistantMessage.content.length;
-							pending = {
-								id: tc.id ?? `call_${index}`,
-								name: tc.function?.name ?? "",
-								argumentsBuffer: "",
-								contentIndex,
-							};
-							pendingToolCalls.set(index, pending);
-
-							// Push placeholder tool call into assistant message
-							assistantMessage.content.push({
-								type: "toolCall",
-								id: pending.id,
-								name: pending.name,
-								arguments: {},
-							});
-
-							es.push({ type: "toolcall_start", contentIndex, partial: assistantMessage });
-						}
-
-						if (tc.id) {
-							pending.id = tc.id;
-						}
-						if (tc.function?.name) {
-							pending.name = tc.function.name;
-						}
-
-						if (tc.function?.arguments) {
-							pending.argumentsBuffer += tc.function.arguments;
-							es.push({
-								type: "toolcall_delta",
-								contentIndex: pending.contentIndex,
-								delta: tc.function.arguments,
-								partial: assistantMessage,
-							});
-						}
-					}
-				}
-
-				if (choice.finish_reason === "length") {
-					finishStream("length");
-					return;
-				} else if (choice.finish_reason === "stop" || choice.finish_reason === "tool_calls") {
+				if (choice?.finish_reason === "stop" || choice?.finish_reason === "tool_calls") {
 					finishStream(choice.finish_reason === "tool_calls" ? "toolUse" : "stop");
 					return;
 				}
 			} catch {
-				// Ignore non-JSON lines or malformed chunks
+				// Ignore non-JSON diagnostics or log output
 			}
 		}
 	});
@@ -435,7 +387,6 @@ export function stream(
 		}
 	});
 
-	// Write payload to stdin and close stdin stream
 	child.stdin.write(JSON.stringify(payload) + "\n", () => {
 		child.stdin.end();
 	});
