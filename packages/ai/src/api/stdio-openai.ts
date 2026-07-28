@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import path from "path";
 import type {
 	AssistantMessage,
 	Context,
@@ -126,7 +127,8 @@ export function stream(
 	};
 
 	const command = options?.command ?? (model.baseUrl && !model.baseUrl.startsWith("http") ? model.baseUrl : "python3");
-	const args = options?.args ?? (command === "python3" ? ["scripts/mlx_engine.py"] : []);
+	const defaultEngineScript = path.resolve(process.env.OPENCODE_ROOT ?? process.cwd(), "scripts/mlx_engine.py");
+	const args = options?.args ?? (command === "python3" ? [defaultEngineScript] : []);
 
 	const assistantMessage: AssistantMessage = {
 		role: "assistant",

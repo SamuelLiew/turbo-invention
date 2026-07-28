@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 import os
 import sys
-import ssl
 import json
 import re
 import numpy as np
 
 # --- Security & Corporate Air-Gapped Enforcements ---
 os.environ["HF_HUB_OFFLINE"] = "1"
-ssl._create_default_https_context = ssl._create_unverified_context
 
 import mlx.core as mx
 from mlx_lm import load, stream_generate
@@ -94,7 +92,7 @@ def build_prompt(tokenizer, messages: list, tools: list | None) -> str:
             print(f"[!] apply_chat_template failed ({e}), using manual fallback.", file=sys.stderr)
 
     parts = []
-    system = next((m["content"] for m in messages if m.get("role") == "system"), "")
+    system = next((m.get("content") for m in messages if m.get("role") == "system"), "")
     if tools:
         system += format_tools_manual(tools)
     if system:
@@ -102,12 +100,17 @@ def build_prompt(tokenizer, messages: list, tools: list | None) -> str:
 
     for msg in messages:
         role = msg.get("role")
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            content = "\n".join(c.get("text", "") for c in content if c.get("type") == "text")
+        elif not isinstance(content, str):
+            content = str(content)
+
         if role == "system":
             continue
         elif role == "user":
-            parts.append(f"<start_of_turn>user\n{msg.get('content', '')}<end_of_turn>")
+            parts.append(f"<start_of_turn>user\n{content}<end_of_turn>")
         elif role == "assistant":
-            content = msg.get("content", "") or ""
             tcs = msg.get("tool_calls", [])
             if tcs:
                 for tc in tcs:
@@ -118,7 +121,7 @@ def build_prompt(tokenizer, messages: list, tools: list | None) -> str:
                     content += f"\n<tool_call>\n{{\"name\": \"{fn.get('name')}\", \"arguments\": {args}}}\n</tool_call>"
             parts.append(f"<start_of_turn>model\n{content}<end_of_turn>")
         elif role == "tool":
-            parts.append(f"<start_of_turn>tool\n{msg.get('content', '')}<end_of_turn>")
+            parts.append(f"<start_of_turn>tool\n{content}<end_of_turn>")
 
     parts.append("<start_of_turn>model\n")
     return "\n".join(parts)
@@ -168,9 +171,15 @@ while True:
         # Inject RAG context into the last user message
         for i in range(len(messages) - 1, -1, -1):
             if messages[i].get("role") == "user":
-                ctx = local_context_search(str(messages[i].get("content", "")))
+                raw_content = messages[i].get("content", "")
+                if isinstance(raw_content, list):
+                    user_str = "\n".join(c.get("text", "") for c in raw_content if c.get("type") == "text")
+                else:
+                    user_str = str(raw_content)
+
+                ctx = local_context_search(user_str)
                 if ctx:
-                    messages[i]["content"] = ctx + "\n\n" + str(messages[i].get("content", ""))
+                    messages[i]["content"] = ctx + "\n\n" + user_str
                 break
 
         prompt_str = build_prompt(tokenizer, messages, tools)
