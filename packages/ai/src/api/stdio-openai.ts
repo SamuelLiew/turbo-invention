@@ -43,9 +43,11 @@ interface OpenAITool {
 }
 
 const BUSY_FLAG = Symbol("stdio_process_busy");
+const BUSY_TIMESTAMP = Symbol("stdio_process_busy_timestamp");
 
 interface ManagedChildProcess extends ChildProcess {
 	[BUSY_FLAG]?: boolean;
+	[BUSY_TIMESTAMP]?: number;
 }
 
 const activeProcesses = new Map<string, ManagedChildProcess>();
@@ -55,7 +57,8 @@ function getOrSpawnChild(command: string, args: string[]): ManagedChildProcess {
 	let child = activeProcesses.get(key);
 
 	if (child && !child.killed && child.exitCode === null && child.stdin && !child.stdin.destroyed) {
-		if (child[BUSY_FLAG]) {
+		const isHung = child[BUSY_FLAG] && Date.now() - (child[BUSY_TIMESTAMP] ?? 0) > 300_000;
+		if (child[BUSY_FLAG] || isHung) {
 			try {
 				child.kill();
 			} catch {
@@ -212,6 +215,7 @@ export function stream(
 	}
 
 	child[BUSY_FLAG] = true;
+	child[BUSY_TIMESTAMP] = Date.now();
 
 	let stdoutBuffer = "";
 	let stderrBuffer = "";
@@ -462,7 +466,11 @@ export function stream(
 	child.on("close", ProcessClose);
 
 	if (child.stdin) {
-		child.stdin.write(JSON.stringify(payload) + "\n");
+		child.stdin.write(JSON.stringify(payload) + "\n", (err) => {
+			if (err && !isDone) {
+				ProcessError(err);
+			}
+		});
 	}
 
 	return es;

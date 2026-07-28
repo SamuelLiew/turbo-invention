@@ -4,10 +4,19 @@ import sys
 import json
 import re
 import copy
+import signal
 import numpy as np
 
 # --- Security & Corporate Air-Gapped Enforcements ---
 os.environ["HF_HUB_OFFLINE"] = "1"
+
+def handle_signal(sig, frame):
+    sys.stdout.flush()
+    sys.stderr.flush()
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, handle_signal)
+signal.signal(signal.SIGINT, handle_signal)
 
 import mlx.core as mx
 from mlx_lm import load, stream_generate
@@ -194,108 +203,68 @@ while True:
         tool_buffer = ""
 
         generate_kwargs = {"prompt": prompt_str, "max_tokens": max_tokens}
+        if temp is not None:
+            generate_kwargs["temp"] = temp
+        if "top_p" in req:
+            generate_kwargs["top_p"] = req["top_p"]
+
         try:
-            for chunk in stream_generate(model, tokenizer, temp=temp, **generate_kwargs):
-                token_text = chunk.text
-                full_response += token_text
-
-                if not in_tool:
-                    if "<tool_call>" in full_response:
-                        idx = full_response.index("<tool_call>")
-                        before = full_response[:idx]
-                        new_text = before[len(text_acc):]
-                        if new_text:
-                            sys.stdout.write(json.dumps({"type": "text", "text": new_text}) + "\n")
-                            sys.stdout.flush()
-                        text_acc = before
-                        in_tool = True
-                        tool_buffer = full_response[idx:]
-                    else:
-                        sys.stdout.write(json.dumps({"type": "text", "text": token_text}) + "\n")
-                        sys.stdout.flush()
-                        text_acc = full_response
-                else:
-                    tool_buffer += token_text
-                    if "</tool_call>" in tool_buffer:
-                        end_idx = tool_buffer.index("</tool_call>") + len("</tool_call>")
-                        complete_block = tool_buffer[:end_idx]
-                        remainder = tool_buffer[end_idx:]
-                        full_response = text_acc + complete_block + remainder
-
-                        _, tcs = parse_response(complete_block)
-                        for tc in tcs:
-                            sys.stdout.write(json.dumps({
-                                "type": "tool_call",
-                                "id": tc["id"],
-                                "name": tc["function"]["name"],
-                                "arguments": json.dumps(tc["function"]["arguments"])
-                            }) + "\n")
-                            sys.stdout.flush()
-
-                        in_tool = False
-                        tool_buffer = ""
-                        text_acc = full_response
-
-                        if remainder:
-                            sys.stdout.write(json.dumps({"type": "text", "text": remainder}) + "\n")
-                            sys.stdout.flush()
-
-                eos_ids = [tokenizer.eos_token_id]
-                if hasattr(tokenizer, "pad_token_id") and tokenizer.pad_token_id is not None:
-                    eos_ids.append(tokenizer.pad_token_id)
-                if chunk.token in eos_ids:
-                    break
+            stream_gen = stream_generate(model, tokenizer, **generate_kwargs)
         except TypeError:
-            for chunk in stream_generate(model, tokenizer, **generate_kwargs):
-                token_text = chunk.text
-                full_response += token_text
+            generate_kwargs.pop("temp", None)
+            generate_kwargs.pop("top_p", None)
+            stream_gen = stream_generate(model, tokenizer, **generate_kwargs)
 
-                if not in_tool:
-                    if "<tool_call>" in full_response:
-                        idx = full_response.index("<tool_call>")
-                        before = full_response[:idx]
-                        new_text = before[len(text_acc):]
-                        if new_text:
-                            sys.stdout.write(json.dumps({"type": "text", "text": new_text}) + "\n")
-                            sys.stdout.flush()
-                        text_acc = before
-                        in_tool = True
-                        tool_buffer = full_response[idx:]
-                    else:
-                        sys.stdout.write(json.dumps({"type": "text", "text": token_text}) + "\n")
+        for chunk in stream_gen:
+            token_text = chunk.text
+            full_response += token_text
+
+            if not in_tool:
+                if "<tool_call>" in full_response:
+                    idx = full_response.index("<tool_call>")
+                    before = full_response[:idx]
+                    new_text = before[len(text_acc):]
+                    if new_text:
+                        sys.stdout.write(json.dumps({"type": "text", "text": new_text}) + "\n")
                         sys.stdout.flush()
-                        text_acc = full_response
+                    text_acc = before
+                    in_tool = True
+                    tool_buffer = full_response[idx:]
                 else:
-                    tool_buffer += token_text
-                    if "</tool_call>" in tool_buffer:
-                        end_idx = tool_buffer.index("</tool_call>") + len("</tool_call>")
-                        complete_block = tool_buffer[:end_idx]
-                        remainder = tool_buffer[end_idx:]
-                        full_response = text_acc + complete_block + remainder
+                    sys.stdout.write(json.dumps({"type": "text", "text": token_text}) + "\n")
+                    sys.stdout.flush()
+                    text_acc = full_response
+            else:
+                tool_buffer += token_text
+                if "</tool_call>" in tool_buffer:
+                    end_idx = tool_buffer.index("</tool_call>") + len("</tool_call>")
+                    complete_block = tool_buffer[:end_idx]
+                    remainder = tool_buffer[end_idx:]
+                    full_response = text_acc + complete_block + remainder
 
-                        _, tcs = parse_response(complete_block)
-                        for tc in tcs:
-                            sys.stdout.write(json.dumps({
-                                "type": "tool_call",
-                                "id": tc["id"],
-                                "name": tc["function"]["name"],
-                                "arguments": json.dumps(tc["function"]["arguments"])
-                            }) + "\n")
-                            sys.stdout.flush()
+                    _, tcs = parse_response(complete_block)
+                    for tc in tcs:
+                        sys.stdout.write(json.dumps({
+                            "type": "tool_call",
+                            "id": tc["id"],
+                            "name": tc["function"]["name"],
+                            "arguments": json.dumps(tc["function"]["arguments"])
+                        }) + "\n")
+                        sys.stdout.flush()
 
-                        in_tool = False
-                        tool_buffer = ""
-                        text_acc = full_response
+                    in_tool = False
+                    tool_buffer = ""
+                    text_acc = full_response
 
-                        if remainder:
-                            sys.stdout.write(json.dumps({"type": "text", "text": remainder}) + "\n")
-                            sys.stdout.flush()
+                    if remainder:
+                        sys.stdout.write(json.dumps({"type": "text", "text": remainder}) + "\n")
+                        sys.stdout.flush()
 
-                eos_ids = [tokenizer.eos_token_id]
-                if hasattr(tokenizer, "pad_token_id") and tokenizer.pad_token_id is not None:
-                    eos_ids.append(tokenizer.pad_token_id)
-                if chunk.token in eos_ids:
-                    break
+            eos_ids = [tokenizer.eos_token_id]
+            if hasattr(tokenizer, "pad_token_id") and tokenizer.pad_token_id is not None:
+                eos_ids.append(tokenizer.pad_token_id)
+            if chunk.token in eos_ids:
+                break
 
         if not in_tool and len(full_response) > len(text_acc):
             remainder = full_response[len(text_acc):]
