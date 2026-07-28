@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "child_process";
 import path from "path";
+import crypto from "crypto";
 import type {
 	AssistantMessage,
 	Context,
@@ -42,23 +43,80 @@ interface OpenAITool {
 	};
 }
 
+interface NDJSONEvent {
+	request_id?: string;
+	type?: string;
+	text?: string;
+	id?: string;
+	name?: string;
+	arguments?: string | Record<string, unknown>;
+	error?: string;
+	usage?: {
+		prompt_tokens?: number;
+		completion_tokens?: number;
+		total_tokens?: number;
+	};
+	choices?: Array<{
+		delta?: {
+			content?: string | null;
+			reasoning_content?: string | null;
+			thinking?: string | null;
+			tool_calls?: Array<{
+				index: number;
+				id?: string;
+				function?: {
+					name?: string;
+					arguments?: string;
+				};
+			}>;
+		};
+		finish_reason?: string | null;
+	}>;
+}
+
 const BUSY_FLAG = Symbol("stdio_process_busy");
-const BUSY_TIMESTAMP = Symbol("stdio_process_busy_timestamp");
 
 interface ManagedChildProcess extends ChildProcess {
 	[BUSY_FLAG]?: boolean;
-	[BUSY_TIMESTAMP]?: number;
 }
 
 const activeProcesses = new Map<string, ManagedChildProcess>();
+
+/** Allowed commands for air-gapped defense-in-depth. */
+const ALLOWED_COMMANDS = new Set(["python3", "python", "python3.11", "python3.12"]);
+
+function isAllowedCommand(cmd: string): boolean {
+	const base = path.basename(cmd);
+	return ALLOWED_COMMANDS.has(base) || cmd.startsWith(path.sep);
+}
+
+/** Remove all stream-specific listeners without touching management listeners. */
+function sanitizeChildStreams(child: ManagedChildProcess) {
+	if (child.stdout) {
+		child.stdout.removeAllListeners("data");
+	}
+	if (child.stderr) {
+		child.stderr.removeAllListeners("data");
+	}
+	// Remove previous stream()'s error/close listeners.
+	// We intentionally leave exit listeners (registered by getOrSpawnChild) alone.
+	child.removeAllListeners("error");
+	child.removeAllListeners("close");
+}
 
 function getOrSpawnChild(command: string, args: string[]): ManagedChildProcess {
 	const key = `${command} ${args.join(" ")}`;
 	let child = activeProcesses.get(key);
 
-	if (child && !child.killed && child.exitCode === null && child.stdin && !child.stdin.destroyed) {
-		const isHung = child[BUSY_FLAG] && Date.now() - (child[BUSY_TIMESTAMP] ?? 0) > 300_000;
-		if (child[BUSY_FLAG] || isHung) {
+	if (
+		child &&
+		!child.killed &&
+		child.exitCode === null &&
+		child.stdin &&
+		!child.stdin.destroyed
+	) {
+		if (child[BUSY_FLAG]) {
+			// Previous stream still marked busy — kill and respawn
 			try {
 				child.kill();
 			} catch {
@@ -67,10 +125,8 @@ function getOrSpawnChild(command: string, args: string[]): ManagedChildProcess {
 			activeProcesses.delete(key);
 			child = undefined;
 		} else {
-			if (child.stdout) child.stdout.removeAllListeners("data");
-			if (child.stderr) child.stderr.removeAllListeners("data");
-			child.removeAllListeners("error");
-			child.removeAllListeners("close");
+			// FIX: Sanitize any stale listeners before reuse
+			sanitizeChildStreams(child);
 			return child;
 		}
 	}
@@ -118,7 +174,7 @@ function buildMessages(context: Context): OpenAIChatMessage[] {
 				if (c.type === "text") {
 					textParts.push(c.text);
 				} else if (c.type === "thinking") {
-					textParts.push(`<thinking>${c.thinking}</thinking>`);
+					textParts.push(`${c.thinking}`);
 				} else if (c.type === "toolCall") {
 					toolCalls.push({
 						id: c.id,
@@ -168,9 +224,13 @@ export function stream(
 ): AssistantMessageEventStream {
 	const es = createAssistantMessageEventStream();
 
+	// FIX: Generate correlation ID for request/response matching
+	const requestId = crypto.randomUUID();
+
 	const messages = buildMessages(context);
 	const tools = buildTools(context);
 	const payload = {
+		request_id: requestId,
 		model: model.id,
 		messages,
 		...(tools && tools.length > 0 ? { tools } : {}),
@@ -179,9 +239,24 @@ export function stream(
 		stream: true,
 	};
 
-	const command = options?.command ?? (model.baseUrl && !model.baseUrl.startsWith("http") ? model.baseUrl : "python3");
-	const defaultEngineScript = path.resolve(process.env.OPENCODE_ROOT ?? process.cwd(), "scripts/mlx_engine.py");
-	const args = options?.args ?? (command === "python3" ? [defaultEngineScript] : []);
+	const command =
+		options?.command ??
+		(model.baseUrl && !model.baseUrl.startsWith("http") ? model.baseUrl : "python3");
+	const defaultEngineScript = path.resolve(
+		process.env.OPENCODE_ROOT ?? process.cwd(),
+		"scripts/mlx_engine.py"
+	);
+	const args =
+		options?.args ?? (command === "python3" ? [defaultEngineScript] : []);
+
+	// FIX: Air-gap defense-in-depth — validate command against allowlist
+	if (!isAllowedCommand(command)) {
+		assistantMessage.stopReason = "error";
+		assistantMessage.errorMessage = `Command "${command}" is not in the allowed list for air-gapped execution.`;
+		es.push({ type: "error", reason: "error", error: assistantMessage });
+		es.end(assistantMessage);
+		return es;
+	}
 
 	const assistantMessage: AssistantMessage = {
 		role: "assistant",
@@ -215,7 +290,6 @@ export function stream(
 	}
 
 	child[BUSY_FLAG] = true;
-	child[BUSY_TIMESTAMP] = Date.now();
 
 	let stdoutBuffer = "";
 	let stderrBuffer = "";
@@ -234,7 +308,7 @@ export function stream(
 		child.removeListener("close", ProcessClose);
 	};
 
-	const finishStream = (reason: Extract<StopReason, "stop" | "length" | "toolUse">) => {
+	const finishStream = (reason: Extract<StopReason, "stop" | "toolUse">) => {
 		if (isDone) return;
 		isDone = true;
 
@@ -255,7 +329,7 @@ export function stream(
 
 		es.push({
 			type: "done",
-			reason: assistantMessage.stopReason as Extract<StopReason, "stop" | "length" | "toolUse">,
+			reason: assistantMessage.stopReason as Extract<StopReason, "stop" | "toolUse">,
 			message: assistantMessage,
 		});
 		es.end(assistantMessage);
@@ -281,6 +355,11 @@ export function stream(
 			return es;
 		}
 		options.signal.addEventListener("abort", onAbort, { once: true });
+		// FIX: Double-check after attaching to close the race window
+		if (options.signal.aborted) {
+			onAbort();
+			return es;
+		}
 	}
 
 	const onStdoutData = (chunk: Buffer | string) => {
@@ -302,32 +381,20 @@ export function stream(
 			}
 
 			try {
-				const event = JSON.parse(line) as {
-					type?: string;
-					text?: string;
-					id?: string;
-					name?: string;
-					arguments?: string | Record<string, unknown>;
-					error?: string;
-					choices?: Array<{
-						delta?: {
-							content?: string | null;
-							reasoning_content?: string | null;
-							thinking?: string | null;
-							tool_calls?: Array<{
-								index: number;
-								id?: string;
-								function?: {
-									name?: string;
-									arguments?: string;
-								};
-							}>;
-						};
-						finish_reason?: string | null;
-					}>;
-				};
+				const event = JSON.parse(line) as NDJSONEvent;
+
+				// FIX: Ignore stale output from previous requests
+				if (event.request_id && event.request_id !== requestId) {
+					continue;
+				}
 
 				if (event.type === "done") {
+					// FIX: Consume token usage from Python engine
+					if (event.usage) {
+						assistantMessage.usage.input = event.usage.prompt_tokens ?? 0;
+						assistantMessage.usage.output = event.usage.completion_tokens ?? 0;
+						assistantMessage.usage.totalTokens = event.usage.total_tokens ?? 0;
+					}
 					finishStream("stop");
 					return;
 				}
@@ -398,6 +465,7 @@ export function stream(
 					continue;
 				}
 
+				// Fallback for OpenAI-compatible streaming format
 				const choice = event.choices?.[0];
 				if (choice?.delta?.content) {
 					if (textIndex === -1) {
@@ -465,12 +533,26 @@ export function stream(
 	child.on("error", ProcessError);
 	child.on("close", ProcessClose);
 
+	// FIX: Guard stdin.write against EPIPE and other write errors
 	if (child.stdin) {
-		child.stdin.write(JSON.stringify(payload) + "\n", (err) => {
+		const payloadLine = JSON.stringify(payload) + "\n";
+		const ok = child.stdin.write(payloadLine, (err) => {
 			if (err && !isDone) {
-				ProcessError(err);
+				isDone = true;
+				cleanupListeners();
+				if (options?.signal) {
+					options.signal.removeEventListener("abort", onAbort);
+				}
+				assistantMessage.stopReason = "error";
+				assistantMessage.errorMessage = `Failed to write to model process: ${err.message}`;
+				es.push({ type: "error", reason: "error", error: assistantMessage });
+				es.end(assistantMessage);
 			}
 		});
+		if (!ok) {
+			// Backpressure — child.stdin is full. For NDJSON this is rare,
+			// but we could add a drain handler if needed.
+		}
 	}
 
 	return es;
