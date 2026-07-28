@@ -3,6 +3,7 @@ import os
 import sys
 import json
 import re
+import copy
 import numpy as np
 
 # --- Security & Corporate Air-Gapped Enforcements ---
@@ -166,7 +167,7 @@ while True:
     try:
         req = json.loads(line)
 
-        messages = [dict(m) for m in req.get("messages", [])]
+        messages = copy.deepcopy(req.get("messages", []))
         tools = req.get("tools", [])
         max_tokens = req.get("max_tokens", 8192)
         temp = req.get("temperature", 0.7)

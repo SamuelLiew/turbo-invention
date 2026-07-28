@@ -64,6 +64,10 @@ function getOrSpawnChild(command: string, args: string[]): ManagedChildProcess {
 			activeProcesses.delete(key);
 			child = undefined;
 		} else {
+			if (child.stdout) child.stdout.removeAllListeners("data");
+			if (child.stderr) child.stderr.removeAllListeners("data");
+			child.removeAllListeners("error");
+			child.removeAllListeners("close");
 			return child;
 		}
 	}
