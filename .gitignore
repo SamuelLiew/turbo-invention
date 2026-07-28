@@ -15,6 +15,9 @@ packages/ai/src/providers/.model-generation-*/
 # Environment
 .env
 
+# Python
+__pycache__/
+
 # Editor files
 .vscode/
 .zed/

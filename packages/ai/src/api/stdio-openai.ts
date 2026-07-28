@@ -1,6 +1,6 @@
-import { spawn, type ChildProcess } from "child_process";
-import path from "path";
+import { type ChildProcess, spawn } from "child_process";
 import crypto from "crypto";
+import path from "path";
 import type {
 	AssistantMessage,
 	Context,
@@ -18,6 +18,8 @@ export interface StdioOpenAIOptions extends StreamOptions {
 	command?: string;
 	/** Extra arguments to pass to the spawned process. Defaults to `["scripts/mlx_engine.py"]`. */
 	args?: string[];
+	/** Milliseconds to wait for a response before killing the child process. Defaults to 5 minutes. */
+	timeoutMs?: number;
 }
 
 interface OpenAIChatMessage {
@@ -82,8 +84,33 @@ interface ManagedChildProcess extends ChildProcess {
 
 const activeProcesses = new Map<string, ManagedChildProcess>();
 
+/** Default time to wait for the engine to answer before force-terminating it. */
+const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
+
 /** Allowed commands for air-gapped defense-in-depth. */
 const ALLOWED_COMMANDS = new Set(["python3", "python", "python3.11", "python3.12"]);
+
+/**
+ * Environment for the engine subprocess. The parent process may hold cloud API
+ * keys; an air-gapped local engine has no use for them, so only pass through
+ * what it needs to run.
+ */
+function buildChildEnv(): NodeJS.ProcessEnv {
+	const passthroughPrefixes = ["OPENCODE_", "KAGGLE_", "MLX_", "HF_", "PYTHON"];
+	const env: NodeJS.ProcessEnv = {};
+
+	for (const name of ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"]) {
+		const value = process.env[name];
+		if (value !== undefined) env[name] = value;
+	}
+	for (const [name, value] of Object.entries(process.env)) {
+		if (value !== undefined && passthroughPrefixes.some((prefix) => name.startsWith(prefix))) {
+			env[name] = value;
+		}
+	}
+
+	return env;
+}
 
 function isAllowedCommand(cmd: string): boolean {
 	const base = path.basename(cmd);
@@ -108,13 +135,7 @@ function getOrSpawnChild(command: string, args: string[]): ManagedChildProcess {
 	const key = `${command} ${args.join(" ")}`;
 	let child = activeProcesses.get(key);
 
-	if (
-		child &&
-		!child.killed &&
-		child.exitCode === null &&
-		child.stdin &&
-		!child.stdin.destroyed
-	) {
+	if (child && !child.killed && child.exitCode === null && child.stdin && !child.stdin.destroyed) {
 		if (child[BUSY_FLAG]) {
 			// Previous stream still marked busy — kill and respawn
 			try {
@@ -131,7 +152,10 @@ function getOrSpawnChild(command: string, args: string[]): ManagedChildProcess {
 		}
 	}
 
-	const newChild = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] }) as ManagedChildProcess;
+	const newChild = spawn(command, args, {
+		stdio: ["pipe", "pipe", "pipe"],
+		env: buildChildEnv(),
+	}) as ManagedChildProcess;
 	newChild[BUSY_FLAG] = false;
 
 	newChild.on("exit", () => {
@@ -239,24 +263,9 @@ export function stream(
 		stream: true,
 	};
 
-	const command =
-		options?.command ??
-		(model.baseUrl && !model.baseUrl.startsWith("http") ? model.baseUrl : "python3");
-	const defaultEngineScript = path.resolve(
-		process.env.OPENCODE_ROOT ?? process.cwd(),
-		"scripts/mlx_engine.py"
-	);
-	const args =
-		options?.args ?? (command === "python3" ? [defaultEngineScript] : []);
-
-	// FIX: Air-gap defense-in-depth — validate command against allowlist
-	if (!isAllowedCommand(command)) {
-		assistantMessage.stopReason = "error";
-		assistantMessage.errorMessage = `Command "${command}" is not in the allowed list for air-gapped execution.`;
-		es.push({ type: "error", reason: "error", error: assistantMessage });
-		es.end(assistantMessage);
-		return es;
-	}
+	const command = options?.command ?? (model.baseUrl && !model.baseUrl.startsWith("http") ? model.baseUrl : "python3");
+	const defaultEngineScript = path.resolve(process.env.OPENCODE_ROOT ?? process.cwd(), "scripts/mlx_engine.py");
+	const args = options?.args ?? (command === "python3" ? [defaultEngineScript] : []);
 
 	const assistantMessage: AssistantMessage = {
 		role: "assistant",
@@ -278,6 +287,15 @@ export function stream(
 
 	es.push({ type: "start", partial: assistantMessage });
 
+	// FIX: Air-gap defense-in-depth — validate command against allowlist
+	if (!isAllowedCommand(command)) {
+		assistantMessage.stopReason = "error";
+		assistantMessage.errorMessage = `Command "${command}" is not in the allowed list for air-gapped execution.`;
+		es.push({ type: "error", reason: "error", error: assistantMessage });
+		es.end(assistantMessage);
+		return es;
+	}
+
 	let child: ManagedChildProcess;
 	try {
 		child = getOrSpawnChild(command, args);
@@ -296,8 +314,24 @@ export function stream(
 	let textIndex = -1;
 	let isDone = false;
 
+	const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+	let hangTimer: ReturnType<typeof setTimeout> | undefined;
+
+	// Measured from the last received event rather than from the request, so a
+	// long-but-healthy generation is not killed mid-stream.
+	const armHangTimeout = () => {
+		if (isDone || timeoutMs <= 0) return;
+		if (hangTimer !== undefined) clearTimeout(hangTimer);
+		hangTimer = setTimeout(onHangTimeout, timeoutMs);
+		hangTimer.unref?.();
+	};
+
 	const cleanupListeners = () => {
 		child[BUSY_FLAG] = false;
+		if (hangTimer !== undefined) {
+			clearTimeout(hangTimer);
+			hangTimer = undefined;
+		}
 		if (child.stdout) {
 			child.stdout.removeListener("data", onStdoutData);
 		}
@@ -349,6 +383,27 @@ export function stream(
 		}
 	};
 
+	function onHangTimeout() {
+		if (isDone) return;
+		isDone = true;
+		cleanupListeners();
+
+		if (options?.signal) {
+			options.signal.removeEventListener("abort", onAbort);
+		}
+
+		try {
+			child.kill("SIGKILL");
+		} catch {
+			// Process may already be gone
+		}
+
+		assistantMessage.stopReason = "error";
+		assistantMessage.errorMessage = `Model process produced no output for ${timeoutMs}ms and was terminated.${stderrBuffer ? ` stderr: ${stderrBuffer.trim()}` : ""}`;
+		es.push({ type: "error", reason: "error", error: assistantMessage });
+		es.end(assistantMessage);
+	}
+
 	if (options?.signal) {
 		if (options.signal.aborted) {
 			onAbort();
@@ -365,6 +420,7 @@ export function stream(
 	const onStdoutData = (chunk: Buffer | string) => {
 		if (isDone) return;
 
+		armHangTimeout();
 		stdoutBuffer += chunk.toString("utf8");
 		const lines = stdoutBuffer.split("\n");
 		stdoutBuffer = lines.pop() ?? "";
@@ -536,6 +592,7 @@ export function stream(
 	// FIX: Guard stdin.write against EPIPE and other write errors
 	if (child.stdin) {
 		const payloadLine = JSON.stringify(payload) + "\n";
+		armHangTimeout();
 		const ok = child.stdin.write(payloadLine, (err) => {
 			if (err && !isDone) {
 				isDone = true;

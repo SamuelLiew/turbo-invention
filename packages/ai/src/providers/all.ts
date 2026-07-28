@@ -17,6 +17,7 @@ import { googleProvider } from "./google.ts";
 import { googleVertexProvider } from "./google-vertex.ts";
 import { groqProvider } from "./groq.ts";
 import { huggingfaceProvider } from "./huggingface.ts";
+import { networkImagesAllowed } from "./images/network-gate.ts";
 import { kimiCodingProvider } from "./kimi-coding.ts";
 import { minimaxProvider } from "./minimax.ts";
 import { minimaxCnProvider } from "./minimax-cn.ts";
@@ -33,6 +34,7 @@ import { openrouterImagesProvider } from "./openrouter-images.ts";
 import { qwenTokenPlanProvider } from "./qwen-token-plan.ts";
 import { qwenTokenPlanCnProvider } from "./qwen-token-plan-cn.ts";
 import { radiusProvider } from "./radius.ts";
+import { stdioLocalProvider } from "./stdio-local.ts";
 import { togetherProvider } from "./together.ts";
 import { vercelAIGatewayProvider } from "./vercel-ai-gateway.ts";
 import { xaiProvider } from "./xai.ts";
@@ -40,7 +42,6 @@ import { xiaomiProvider } from "./xiaomi.ts";
 import { xiaomiTokenPlanAmsProvider } from "./xiaomi-token-plan-ams.ts";
 import { xiaomiTokenPlanCnProvider } from "./xiaomi-token-plan-cn.ts";
 import { xiaomiTokenPlanSgpProvider } from "./xiaomi-token-plan-sgp.ts";
-import { stdioLocalProvider } from "./stdio-local.ts";
 import { zaiProvider } from "./zai.ts";
 import { zaiCodingCnProvider } from "./zai-coding-cn.ts";
 
@@ -98,9 +99,14 @@ export function builtinModels(options?: CreateModelsOptions): MutableModels {
 	return models;
 }
 
-/** All built-in image-generation providers, freshly constructed. */
+/** All built-in image-generation providers, freshly constructed.
+ *
+ * SECURITY NOTE: mirrors the air-gap enforced by `builtinProviders()` — the only
+ * built-in image provider (OpenRouter) is network-backed, so it is withheld
+ * unless PI_ALLOW_NETWORK_IMAGES is explicitly set. See
+ * ./images/register-builtins.ts. */
 export function builtinImagesProviders(): ImagesProvider[] {
-	return [openrouterImagesProvider()];
+	return networkImagesAllowed() ? [openrouterImagesProvider()] : [];
 }
 
 /** An `ImagesModels` collection with every built-in image-generation provider registered. */

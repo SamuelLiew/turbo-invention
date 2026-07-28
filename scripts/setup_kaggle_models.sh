@@ -30,26 +30,19 @@ setup_kaggle_credentials() {
   fi
 
   mkdir -p "$HOME/.kaggle"
-  cat <<EOF > "$HOME/.kaggle/kaggle.json"
+  # umask before the write so the key is never briefly world-readable.
+  (
+    umask 077
+    cat <<EOF > "$HOME/.kaggle/kaggle.json"
 {
   "username": "$kaggle_user",
   "key": "$kaggle_key"
 }
 EOF
+  )
   chmod 600 "$HOME/.kaggle/kaggle.json"
   echo "[+] Configured $HOME/.kaggle/kaggle.json (chmod 600)"
-
-  ZSHRC="$HOME/.zshrc"
-  if [ -f "$ZSHRC" ] || [ "${SHELL:-}" = "*/zsh" ] || [ -n "${ZSH_VERSION:-}" ] || [ "$(uname)" = "Darwin" ]; then
-    touch "$ZSHRC"
-    if ! grep -q "KAGGLE_USERNAME" "$ZSHRC" 2>/dev/null; then
-      echo "" >> "$ZSHRC"
-      echo "# Kaggle API Credentials" >> "$ZSHRC"
-      echo "export KAGGLE_USERNAME=\"$kaggle_user\"" >> "$ZSHRC"
-      echo "export KAGGLE_KEY=\"$kaggle_key\"" >> "$ZSHRC"
-      echo "[+] Appended KAGGLE_USERNAME and KAGGLE_KEY to $ZSHRC"
-    fi
-  fi
+  echo "[*] Credentials are not written to any shell rc file; kagglehub reads kaggle.json directly."
 
   export KAGGLE_USERNAME="$kaggle_user"
   export KAGGLE_KEY="$kaggle_key"

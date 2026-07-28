@@ -11,13 +11,13 @@ Protocol: NDJSON over stdin/stdout
 import os
 import sys
 import json
-import re
 import copy
-import itertools
+import inspect
 
 # --- Security & Corporate Air-Gapped Enforcements ---
 os.environ["HF_HUB_OFFLINE"] = "1"
 
+import numpy as np
 import mlx.core as mx
 from mlx_lm import load, stream_generate
 from mlx_embeddings.utils import load as load_embeddings
@@ -47,6 +47,15 @@ METADATA_FILE = os.environ.get(
 MAX_RAG_CHARS_PER_FILE = 4000
 MAX_RAG_TOTAL_CHARS = 12000
 
+# BGE v1.5 model cards ask for this instruction prefix on the *query* side only;
+# documents are embedded without it. Omitting it skews cosine scores upward for
+# unrelated files, which makes any similarity floor meaningless.
+BGE_QUERY_PREFIX = os.environ.get(
+    "OPENCODE_BGE_QUERY_PREFIX",
+    "Represent this sentence for searching relevant passages: "
+)
+RAG_MIN_SCORE = float(os.environ.get("OPENCODE_RAG_MIN_SCORE", "0.3"))
+
 print("[*] Initializing GPU MLX Engine with Tool Calling + BGE RAG...", file=sys.stderr)
 
 try:
@@ -75,7 +84,7 @@ def local_context_search(query: str, top_k: int = 3) -> str:
 
     # FIX: Handle both dict and array returns from tokenizer.encode
     encoded = embed_tokenizer.encode(
-        query, max_length=512, truncation=True, return_tensors="np"
+        BGE_QUERY_PREFIX + query, max_length=512, truncation=True, return_tensors="np"
     )
     if isinstance(encoded, dict):
         input_ids = mx.array(encoded["input_ids"])
@@ -94,11 +103,18 @@ def local_context_search(query: str, top_k: int = 3) -> str:
     scores = mx.matmul(code_embeddings, query_vector.T).flatten()
     mx.eval(scores)
     top_indices = mx.argsort(-scores)[:top_k].tolist()
+    score_list = scores.tolist()
 
-    context = "\n=== RELEVANT CODEBASE FILES ===\n"
-    total_chars = len(context)
+    header = "\n=== RELEVANT CODEBASE FILES ===\n"
+    context = ""
+    total_chars = len(header)
 
     for idx in top_indices:
+        # Only inject matches that are actually relevant; unrelated files waste
+        # context and actively mislead the model.
+        if score_list[idx] < RAG_MIN_SCORE:
+            continue
+
         match = code_vault[idx]
         file_text = match.get("text", "")
 
@@ -113,7 +129,7 @@ def local_context_search(query: str, top_k: int = 3) -> str:
         context += entry
         total_chars += len(entry)
 
-    return context
+    return header + context if context else ""
 
 
 # --- Prompt Construction with Tools ---
@@ -209,9 +225,12 @@ def build_prompt(tokenizer, messages: list, tools: list | None) -> str:
 
 
 # --- Response Parsing (State Machine, not Regex) ---
-def extract_tool_calls(text: str):
+def extract_tool_calls(text: str, id_offset: int = 0):
     """
     Extract tool calls from text using a proper scanner.
+
+    `id_offset` continues numbering across successive calls within one request so
+    that streaming each block separately still yields unique ids.
     Returns: (clean_text: str, tool_calls: list, error: str|None)
     """
     tool_calls = []
@@ -241,7 +260,7 @@ def extract_tool_calls(text: str):
             if isinstance(args, str):
                 args = json.loads(args)
             tool_calls.append({
-                "id": f"call_{len(tool_calls):03d}",
+                "id": f"call_{id_offset + len(tool_calls):03d}",
                 "type": "function",
                 "function": {"name": name, "arguments": args}
             })
@@ -263,6 +282,83 @@ def validate_request(req: dict) -> tuple[bool, str]:
     if not isinstance(req.get("messages"), list):
         return False, "'messages' must be an array"
     return True, ""
+
+
+# --- Sampling Parameters ---
+# mlx-lm >= 0.20 removed the bare `temp`/`top_p` kwargs from stream_generate in
+# favour of a `sampler` callable built by mlx_lm.sample_utils.make_sampler.
+# Passing them directly is therefore either ignored or a TypeError, which is why
+# these helpers introspect the installed API instead of guessing.
+SAMPLER_KWARG_ALIASES = {"temp": ("temp", "temperature")}
+
+
+def _accepted_kwargs(fn) -> set[str] | None:
+    """Keyword names `fn` accepts, or None if it accepts arbitrary kwargs."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return None
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return None
+    return set(params)
+
+
+def _resolve_kwarg(fn, canonical: str) -> str | None:
+    accepted = _accepted_kwargs(fn)
+    for name in SAMPLER_KWARG_ALIASES.get(canonical, (canonical,)):
+        if accepted is None or name in accepted:
+            return name
+    return None
+
+
+def _warn_unsupported(param: str, target: str) -> None:
+    print(f"[!] Installed mlx-lm does not support '{param}' via {target}; ignoring it.",
+          file=sys.stderr)
+    sys.stderr.flush()
+
+
+def build_generate_kwargs(prompt: str, max_tokens: int, temp, top_p, repetition_penalty) -> dict:
+    kwargs = {"prompt": prompt, "max_tokens": max_tokens}
+    try:
+        from mlx_lm import sample_utils
+    except ImportError:
+        sample_utils = None
+
+    requested = {name: value
+                 for name, value in (("temp", temp), ("top_p", top_p))
+                 if value is not None}
+
+    make_sampler = getattr(sample_utils, "make_sampler", None)
+    if requested and make_sampler is not None and _resolve_kwarg(stream_generate, "sampler"):
+        sampler_kwargs = {}
+        for name, value in requested.items():
+            resolved = _resolve_kwarg(make_sampler, name)
+            if resolved:
+                sampler_kwargs[resolved] = value
+            else:
+                _warn_unsupported(name, "make_sampler")
+        kwargs["sampler"] = make_sampler(**sampler_kwargs)
+    else:
+        # Legacy mlx-lm accepted the sampling params directly.
+        for name, value in requested.items():
+            resolved = _resolve_kwarg(stream_generate, name)
+            if resolved:
+                kwargs[resolved] = value
+            else:
+                _warn_unsupported(name, "stream_generate")
+
+    if repetition_penalty is not None:
+        make_logits_processors = getattr(sample_utils, "make_logits_processors", None)
+        if make_logits_processors is not None and _resolve_kwarg(stream_generate, "logits_processors"):
+            kwargs["logits_processors"] = make_logits_processors(
+                repetition_penalty=repetition_penalty
+            )
+        elif _resolve_kwarg(stream_generate, "repetition_penalty"):
+            kwargs["repetition_penalty"] = repetition_penalty
+        else:
+            _warn_unsupported("repetition_penalty", "stream_generate")
+
+    return kwargs
 
 
 # --- Main IPC Loop ---
@@ -314,33 +410,23 @@ while True:
 
         prompt_str = build_prompt(tokenizer, messages, tools)
 
-        # FIX: Build sampling params cleanly, avoid massive code duplication
-        generate_kwargs = {"prompt": prompt_str, "max_tokens": max_tokens}
-        sampling_params = {}
-        if temp is not None:
-            sampling_params["temp"] = temp
-        if req.get("top_p") is not None:
-            sampling_params["top_p"] = req["top_p"]
-        if req.get("repetition_penalty") is not None:
-            sampling_params["repetition_penalty"] = req["repetition_penalty"]
-
-        def _stream_with_sampling():
-            return stream_generate(model, tokenizer, **{**generate_kwargs, **sampling_params})
-
-        # Try with sampling params; fallback once if unsupported
-        try:
-            gen_iter = _stream_with_sampling()
-            # Peek to validate params are accepted
-            first_chunk = next(gen_iter)
-            gen_iter = itertools.chain([first_chunk], gen_iter)
-        except TypeError:
-            gen_iter = stream_generate(model, tokenizer, **generate_kwargs)
+        # FIX: Build sampling params against the installed mlx-lm API so that
+        # temperature/top_p actually take effect instead of silently no-op'ing.
+        generate_kwargs = build_generate_kwargs(
+            prompt_str,
+            max_tokens,
+            temp,
+            req.get("top_p"),
+            req.get("repetition_penalty"),
+        )
+        gen_iter = stream_generate(model, tokenizer, **generate_kwargs)
 
         # --- Unified Streaming Handler ---
         buffer = ""
         processed_pos = 0
         in_tool = False
         tool_start_pos = 0
+        emitted_tool_calls = 0
         eos_ids = [tokenizer.eos_token_id]
         if hasattr(tokenizer, "pad_token_id") and tokenizer.pad_token_id is not None:
             eos_ids.append(tokenizer.pad_token_id)
@@ -388,7 +474,7 @@ while True:
                         break
 
                     complete_block = buffer[tool_start_pos:tag_end + len("</tool_call>")]
-                    clean, tcs, err = extract_tool_calls(complete_block)
+                    clean, tcs, err = extract_tool_calls(complete_block, emitted_tool_calls)
 
                     if err:
                         sys.stdout.write(json.dumps({
@@ -409,22 +495,14 @@ while True:
                         }) + "\n")
                         sys.stdout.flush()
 
+                    emitted_tool_calls += len(tcs)
                     in_tool = False
                     processed_pos = tag_end + len("</tool_call>")
                     # Continue loop to check for more tool calls or trailing text
 
-        # Emit any remaining text after streaming ends
-        if not in_tool and processed_pos < len(buffer):
-            remainder = buffer[processed_pos:]
-            if remainder:
-                sys.stdout.write(json.dumps({
-                    "type": "text",
-                    "text": remainder,
-                    "request_id": request_id
-                }) + "\n")
-                sys.stdout.flush()
-
-        # Final safety parse (catches any tool calls missed by streaming, e.g. if EOS hit mid-tag)
+        # Final safety parse of the *unprocessed remainder only* (e.g. a block
+        # completed in the same chunk that hit EOS). Parsing the whole buffer here
+        # would re-emit every tool call already streamed above.
         if in_tool:
             # Unclosed tag at end of generation
             sys.stdout.write(json.dumps({
@@ -433,8 +511,9 @@ while True:
                 "request_id": request_id
             }) + "\n")
             sys.stdout.flush()
-        else:
-            clean_text, final_tcs, err = extract_tool_calls(buffer)
+        elif processed_pos < len(buffer):
+            tail = buffer[processed_pos:]
+            clean_text, final_tcs, err = extract_tool_calls(tail, emitted_tool_calls)
             if err:
                 sys.stdout.write(json.dumps({
                     "type": "error",
@@ -442,9 +521,16 @@ while True:
                     "request_id": request_id
                 }) + "\n")
                 sys.stdout.flush()
-            elif final_tcs and not in_tool:
-                # Emit any tool calls that weren't caught during streaming
-                # (shouldn't happen with the state machine, but defensive)
+            else:
+                remainder = clean_text if final_tcs else tail
+                if remainder:
+                    sys.stdout.write(json.dumps({
+                        "type": "text",
+                        "text": remainder,
+                        "request_id": request_id
+                    }) + "\n")
+                    sys.stdout.flush()
+
                 for tc in final_tcs:
                     sys.stdout.write(json.dumps({
                         "type": "tool_call",
