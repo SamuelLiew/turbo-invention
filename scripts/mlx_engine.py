@@ -121,7 +121,9 @@ def build_prompt(tokenizer, messages: list, tools: list | None) -> str:
                     content += f"\n<tool_call>\n{{\"name\": \"{fn.get('name')}\", \"arguments\": {args}}}\n</tool_call>"
             parts.append(f"<start_of_turn>model\n{content}<end_of_turn>")
         elif role == "tool":
-            parts.append(f"<start_of_turn>tool\n{content}<end_of_turn>")
+            tc_id = msg.get("tool_call_id", "")
+            prefix = f"ID: {tc_id}\n" if tc_id else ""
+            parts.append(f"<start_of_turn>tool\n{prefix}{content}<end_of_turn>")
 
     parts.append("<start_of_turn>model\n")
     return "\n".join(parts)
