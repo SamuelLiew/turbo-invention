@@ -1,4 +1,4 @@
-import { spawn } from "child_process";
+import { spawn, type ChildProcess } from "child_process";
 import path from "path";
 import type {
 	AssistantMessage,
@@ -8,7 +8,6 @@ import type {
 	StopReason,
 	StreamOptions,
 	TextContent,
-	ThinkingContent,
 	ToolCall,
 } from "../types.ts";
 import { type AssistantMessageEventStream, createAssistantMessageEventStream } from "../utils/event-stream.ts";
@@ -41,6 +40,34 @@ interface OpenAITool {
 		description?: string;
 		parameters?: Record<string, unknown>;
 	};
+}
+
+const activeProcesses = new Map<string, ChildProcess>();
+
+function getOrSpawnChild(command: string, args: string[]): ChildProcess {
+	const key = `${command} ${args.join(" ")}`;
+	let child = activeProcesses.get(key);
+
+	if (child && !child.killed && child.exitCode === null && child.stdin && !child.stdin.destroyed) {
+		return child;
+	}
+
+	child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+
+	child.on("exit", () => {
+		if (activeProcesses.get(key) === child) {
+			activeProcesses.delete(key);
+		}
+	});
+
+	child.on("error", () => {
+		if (activeProcesses.get(key) === child) {
+			activeProcesses.delete(key);
+		}
+	});
+
+	activeProcesses.set(key, child);
+	return child;
 }
 
 function buildMessages(context: Context): OpenAIChatMessage[] {
@@ -150,9 +177,9 @@ export function stream(
 
 	es.push({ type: "start", partial: assistantMessage });
 
-	let child: ReturnType<typeof spawn>;
+	let child: ChildProcess;
 	try {
-		child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+		child = getOrSpawnChild(command, args);
 	} catch (err) {
 		assistantMessage.stopReason = "error";
 		assistantMessage.errorMessage = err instanceof Error ? err.message : String(err);
@@ -161,34 +188,27 @@ export function stream(
 		return es;
 	}
 
-	let aborted = false;
-	const onAbort = () => {
-		aborted = true;
-		child.kill();
-		if (assistantMessage.stopReason === "pending") {
-			assistantMessage.stopReason = "aborted";
-			assistantMessage.errorMessage = "Request aborted by user";
-			es.push({ type: "error", reason: "aborted", error: assistantMessage });
-			es.end(assistantMessage);
-		}
-	};
-
-	if (options?.signal) {
-		if (options.signal.aborted) {
-			onAbort();
-			return es;
-		}
-		options.signal.addEventListener("abort", onAbort, { once: true });
-	}
-
 	let stdoutBuffer = "";
 	let stderrBuffer = "";
 	let textIndex = -1;
 	let isDone = false;
 
+	const cleanupListeners = () => {
+		if (child.stdout) {
+			child.stdout.removeListener("data", onStdoutData);
+		}
+		if (child.stderr) {
+			child.stderr.removeListener("data", onStderrData);
+		}
+		child.removeListener("error", ProcessError);
+		child.removeListener("close", ProcessClose);
+	};
+
 	const finishStream = (reason: Extract<StopReason, "stop" | "length" | "toolUse">) => {
 		if (isDone) return;
 		isDone = true;
+
+		cleanupListeners();
 
 		if (options?.signal) {
 			options.signal.removeEventListener("abort", onAbort);
@@ -211,11 +231,32 @@ export function stream(
 		es.end(assistantMessage);
 	};
 
-	child.stdout.setEncoding("utf8");
-	child.stdout.on("data", (chunk: string) => {
-		if (isDone || aborted) return;
+	const onAbort = () => {
+		if (isDone) return;
+		isDone = true;
+		cleanupListeners();
 
-		stdoutBuffer += chunk;
+		child.kill();
+		if (assistantMessage.stopReason === "pending") {
+			assistantMessage.stopReason = "aborted";
+			assistantMessage.errorMessage = "Request aborted by user";
+			es.push({ type: "error", reason: "aborted", error: assistantMessage });
+			es.end(assistantMessage);
+		}
+	};
+
+	if (options?.signal) {
+		if (options.signal.aborted) {
+			onAbort();
+			return es;
+		}
+		options.signal.addEventListener("abort", onAbort, { once: true });
+	}
+
+	const onStdoutData = (chunk: Buffer | string) => {
+		if (isDone) return;
+
+		stdoutBuffer += chunk.toString("utf8");
 		const lines = stdoutBuffer.split("\n");
 		stdoutBuffer = lines.pop() ?? "";
 
@@ -256,7 +297,6 @@ export function stream(
 					}>;
 				};
 
-				// Handle NDJSON stream protocol (from mlx_engine.py)
 				if (event.type === "done") {
 					finishStream("stop");
 					return;
@@ -264,6 +304,7 @@ export function stream(
 
 				if (event.type === "error") {
 					isDone = true;
+					cleanupListeners();
 					if (options?.signal) {
 						options.signal.removeEventListener("abort", onAbort);
 					}
@@ -327,7 +368,6 @@ export function stream(
 					continue;
 				}
 
-				// Fallback handle standard OpenAI delta formats
 				const choice = event.choices?.[0];
 				if (choice?.delta?.content) {
 					if (textIndex === -1) {
@@ -352,16 +392,16 @@ export function stream(
 				// Ignore non-JSON diagnostics or log output
 			}
 		}
-	});
+	};
 
-	child.stderr.setEncoding("utf8");
-	child.stderr.on("data", (chunk: string) => {
-		stderrBuffer += chunk;
-	});
+	const onStderrData = (chunk: Buffer | string) => {
+		stderrBuffer += chunk.toString("utf8");
+	};
 
-	child.on("error", (err) => {
-		if (isDone || aborted) return;
+	const ProcessError = (err: Error) => {
+		if (isDone) return;
 		isDone = true;
+		cleanupListeners();
 		if (options?.signal) {
 			options.signal.removeEventListener("abort", onAbort);
 		}
@@ -370,11 +410,12 @@ export function stream(
 		assistantMessage.errorMessage = err.message;
 		es.push({ type: "error", reason: "error", error: assistantMessage });
 		es.end(assistantMessage);
-	});
+	};
 
-	child.on("close", (code) => {
-		if (isDone || aborted) return;
+	const ProcessClose = (code: number | null) => {
+		if (isDone) return;
 		isDone = true;
+		cleanupListeners();
 		if (options?.signal) {
 			options.signal.removeEventListener("abort", onAbort);
 		}
@@ -387,11 +428,16 @@ export function stream(
 		} else {
 			finishStream("stop");
 		}
-	});
+	};
 
-	child.stdin.write(JSON.stringify(payload) + "\n", () => {
-		child.stdin.end();
-	});
+	if (child.stdout) child.stdout.on("data", onStdoutData);
+	if (child.stderr) child.stderr.on("data", onStderrData);
+	child.on("error", ProcessError);
+	child.on("close", ProcessClose);
+
+	if (child.stdin) {
+		child.stdin.write(JSON.stringify(payload) + "\n");
+	}
 
 	return es;
 }
