@@ -9,8 +9,12 @@
  * Do NOT restore auto-discovery of extensions or HTTP-based skills.
  */
 
-import type { ProviderRegistry } from "../models.ts";
+import type { Provider } from "../models.ts";
 import { stdioLocalProvider } from "./stdio-local.ts";
+
+export interface ProviderRegistry {
+	register(provider: Provider): void;
+}
 
 export function registerBuiltins(registry: ProviderRegistry): void {
 	// Local MLX provider — zero external network surface
