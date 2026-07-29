@@ -6,8 +6,19 @@
  */
 
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { contentText, type RetryCallbacks, type RetryPolicy, retryAssistantCall, uuidv7 } from "@earendil-works/pi-ai";
-import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@earendil-works/pi-ai/compat";
+import {
+	type Api,
+	type AssistantMessage,
+	type Context,
+	type Model,
+	type RetryCallbacks,
+	type RetryPolicy,
+	type SimpleStreamOptions,
+	type Usage,
+	contentText,
+	retryAssistantCall,
+	uuidv7,
+} from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { convertToLlm } from "../messages.ts";
 import {
@@ -560,7 +571,7 @@ function createSummarizationOptions(
  * immediately (see {@link retryAssistantCall}).
  */
 export async function completeSummarization(
-	model: Model<any>,
+	model: Model<Api>,
 	context: Context,
 	options: SimpleStreamOptions,
 	streamFn?: StreamFn,

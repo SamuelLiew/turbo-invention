@@ -23,7 +23,6 @@ export {
 	parseSkillBlock,
 	type SessionStats,
 } from "./core/agent-session.ts";
-export { readStoredCredential } from "./core/auth-storage.ts";
 // Compaction
 export {
 	type BranchPreparation,
@@ -166,15 +165,6 @@ export {
 // Footer data provider (git branch + extension statuses - data not otherwise available to extensions)
 export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.ts";
 export { convertToLlm } from "./core/messages.ts";
-export { ModelRegistry } from "./core/model-registry.ts";
-export {
-	type ModelScopeDiagnostic,
-	type ResolveCliModelResult,
-	type ResolveModelScopeResult,
-	resolveCliModel,
-	resolveModelScopeWithDiagnostics,
-	type ScopedModel,
-} from "./core/model-resolver.ts";
 export {
 	type CreateModelRuntimeOptions,
 	ModelRuntime,
@@ -192,33 +182,6 @@ export { DefaultPackageManager } from "./core/package-manager.ts";
 export type { ResourceCollision, ResourceDiagnostic, ResourceLoader } from "./core/resource-loader.ts";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.ts";
 // SDK for programmatic usage
-export {
-	AgentSessionRuntime,
-	type AgentSessionRuntimeDiagnostic,
-	type AgentSessionServices,
-	type CreateAgentSessionFromServicesOptions,
-	type CreateAgentSessionOptions,
-	type CreateAgentSessionResult,
-	type CreateAgentSessionRuntimeFactory,
-	type CreateAgentSessionRuntimeResult,
-	type CreateAgentSessionServicesOptions,
-	// Factory
-	createAgentSession,
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-	createBashTool,
-	// Tool factories (for custom cwd)
-	createCodingTools,
-	createEditTool,
-	createFindTool,
-	createGrepTool,
-	createLsTool,
-	createReadOnlyTools,
-	createReadTool,
-	createWriteTool,
-	type PromptTemplate,
-} from "./core/sdk.ts";
 export {
 	type BranchSummaryEntry,
 	buildContextEntries,

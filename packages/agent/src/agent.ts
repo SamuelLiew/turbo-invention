@@ -8,7 +8,6 @@ import type {
 	Transport,
 } from "@earendil-works/pi-ai";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
-import { getDefaultStreamFn } from "./stream-fn.ts";
 import type {
 	AfterToolCallContext,
 	AfterToolCallResult,
@@ -448,11 +447,11 @@ export class Agent {
 			prepareNextTurn:
 				this.prepareNextTurnWithContext || this.prepareNextTurn
 					? async (context) => {
-							if (this.prepareNextTurnWithContext) {
-								return await this.prepareNextTurnWithContext(context, this.signal);
-							}
-							return await this.prepareNextTurn?.(this.signal);
+						if (this.prepareNextTurnWithContext) {
+							return await this.prepareNextTurnWithContext(context, this.signal);
 						}
+						return await this.prepareNextTurn?.(this.signal);
+					}
 					: undefined,
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
@@ -474,7 +473,7 @@ export class Agent {
 		}
 
 		const abortController = new AbortController();
-		let resolvePromise = () => {};
+		let resolvePromise = () => { };
 		const promise = new Promise<void>((resolve) => {
 			resolvePromise = resolve;
 		});

@@ -595,25 +595,25 @@ export function createProvider<TApi extends Api = Api>(input: CreateProviderOpti
 		getModels: currentModels,
 		refreshModels: fetchModels
 			? (context) => {
-				inflightRefresh ??= (async () => {
-					try {
-						const stored = await context.store.read();
-						if (stored) {
-							dynamicModels = stored.models
-								.filter((model) => model.provider === input.id)
-								.map((model) => model as Model<TApi>);
+					inflightRefresh ??= (async () => {
+						try {
+							const stored = await context.store.read();
+							if (stored) {
+								dynamicModels = stored.models
+									.filter((model) => model.provider === input.id)
+									.map((model) => model as Model<TApi>);
+							}
+							if (!context.allowNetwork || context.signal?.aborted) return;
+							const refreshed = await fetchModels(context);
+							if (context.signal?.aborted) return;
+							dynamicModels = refreshed;
+							await context.store.write({ models: refreshed, checkedAt: Date.now() });
+						} finally {
+							inflightRefresh = undefined;
 						}
-						if (!context.allowNetwork || context.signal?.aborted) return;
-						const refreshed = await fetchModels(context);
-						if (context.signal?.aborted) return;
-						dynamicModels = refreshed;
-						await context.store.write({ models: refreshed, checkedAt: Date.now() });
-					} finally {
-						inflightRefresh = undefined;
-					}
-				})();
-				return inflightRefresh;
-			}
+					})();
+					return inflightRefresh;
+				}
 			: undefined,
 		filterModels: input.filterModels,
 		stream: (model, context, options) => dispatch(model, (streams) => streams.stream(model, context, options)),

@@ -1,11 +1,10 @@
 export type { Static, TSchema } from "typebox";
 export { Type } from "typebox";
-
+export * from "./api/lazy.ts";
 // Core only, side-effect free: no generated catalogs, no cloud provider factories,
 // no api-registry, no OAuth implementations, no compat, no images.
 // Provider factories live under "@earendil-works/pi-ai/providers/*".
 export type { StdioOpenAIOptions } from "./api/stdio-openai.ts";
-export * from "./api/lazy.ts";
 export * from "./auth/context.ts";
 export * from "./auth/credential-store.ts";
 export * from "./auth/helpers.ts";

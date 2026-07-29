@@ -27,29 +27,17 @@ import type {
 import { contentText } from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
-	AuthResult,
 	ImageContent,
 	Model,
-	ProviderHeaders,
-	TextContent,
 	Usage,
 } from "@earendil-works/pi-ai/compat";
 import {
-	clampThinkingLevel,
-	cleanupSessionResources,
-	getSupportedThinkingLevels,
-	isContextOverflow,
-	isRetryableAssistantError,
-	modelsAreEqual,
 	type RetryCallbacks,
-	resetApiProviders,
-	streamSimple,
 } from "@earendil-works/pi-ai/compat";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { sleep } from "../utils/sleep.ts";
-import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import {
 	type CompactionResult,
@@ -93,7 +81,6 @@ import {
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
-import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
@@ -139,43 +126,43 @@ export function parseSkillBlock(text: string): ParsedSkillBlock | null {
 export type AgentSessionEvent =
 	| Exclude<AgentEvent, { type: "agent_end" }>
 	| {
-			type: "agent_end";
-			messages: AgentMessage[];
-			willRetry: boolean;
-	  }
+		type: "agent_end";
+		messages: AgentMessage[];
+		willRetry: boolean;
+	}
 	| { type: "agent_settled" }
 	| {
-			type: "queue_update";
-			steering: readonly string[];
-			followUp: readonly string[];
-	  }
+		type: "queue_update";
+		steering: readonly string[];
+		followUp: readonly string[];
+	}
 	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
 	| { type: "entry_appended"; entry: SessionEntry }
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	| {
-			type: "compaction_end";
-			reason: "manual" | "threshold" | "overflow";
-			result: CompactionResult | undefined;
-			aborted: boolean;
-			willRetry: boolean;
-			errorMessage?: string;
-	  }
+		type: "compaction_end";
+		reason: "manual" | "threshold" | "overflow";
+		result: CompactionResult | undefined;
+		aborted: boolean;
+		willRetry: boolean;
+		errorMessage?: string;
+	}
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
 	| {
-			type: "summarization_retry_scheduled";
-			attempt: number;
-			maxAttempts: number;
-			delayMs: number;
-			errorMessage: string;
-	  }
+		type: "summarization_retry_scheduled";
+		attempt: number;
+		maxAttempts: number;
+		delayMs: number;
+		errorMessage: string;
+	}
 	| { type: "summarization_retry_attempt_start"; source: "branchSummary" }
 	| {
-			type: "summarization_retry_attempt_start";
-			source: "compaction";
-			reason: "manual" | "threshold" | "overflow";
-	  }
+		type: "summarization_retry_attempt_start";
+		source: "compaction";
+		reason: "manual" | "threshold" | "overflow";
+	}
 	| { type: "summarization_retry_finished" }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
 	| { type: "bash_execution_update"; id?: string; delta: string };
@@ -431,8 +418,8 @@ export class AgentSession {
 		if (isOAuth) {
 			throw new Error(
 				`Authentication failed for "${model.provider}". ` +
-					`Credentials may have expired or network is unavailable. ` +
-					`Run '/login ${model.provider}' to re-authenticate.`,
+				`Credentials may have expired or network is unavailable. ` +
+				`Run '/login ${model.provider}' to re-authenticate.`,
 			);
 		}
 		throw new Error(formatNoApiKeyFoundMessage(model.provider));
@@ -758,7 +745,7 @@ export class AgentSession {
 						replacement.role === "assistant" ||
 						replacement.role === "toolResult" ||
 						replacement.role === "custom") &&
-					replacement.content == null
+						replacement.content == null
 						? ({ ...replacement, content: [] } as AgentMessage)
 						: replacement;
 				this._replaceMessageInPlace(event.message, normalized);
@@ -1187,8 +1174,8 @@ export class AgentSession {
 				if (isOAuth) {
 					throw new Error(
 						`Authentication failed for "${this.model.provider}". ` +
-							`Credentials may have expired or network is unavailable. ` +
-							`Run '/login ${this.model.provider}' to re-authenticate.`,
+						`Credentials may have expired or network is unavailable. ` +
+						`Run '/login ${this.model.provider}' to re-authenticate.`,
 					);
 				}
 				throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
@@ -2555,15 +2542,15 @@ export class AgentSession {
 		const shellPath = this.settingsManager.getShellPath();
 		const baseToolDefinitions = this._baseToolsOverride
 			? Object.fromEntries(
-					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
-						name,
-						createToolDefinitionFromAgentTool(tool),
-					]),
-				)
+				Object.entries(this._baseToolsOverride).map(([name, tool]) => [
+					name,
+					createToolDefinitionFromAgentTool(tool),
+				]),
+			)
 			: createAllToolDefinitions(this._cwd, {
-					read: { autoResizeImages },
-					bash: { commandPrefix: shellCommandPrefix, shellPath },
-				});
+				read: { autoResizeImages },
+				bash: { commandPrefix: shellCommandPrefix, shellPath },
+			});
 
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),

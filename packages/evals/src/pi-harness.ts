@@ -127,12 +127,15 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 		).session;
 
 		const evalSession = session;
-		const abort = () => void evalSession.abort();
+		if (!evalSession) {
+			throw new Error("Failed to initialize evalSession");
+		}
+		const abort = () => void evalSession!.abort();
 		signal?.addEventListener("abort", abort, { once: true });
 		try {
 			signal?.throwIfAborted();
 			assert.strictEqual(
-				evalSession.extensionRunner.getExtensionPaths().length,
+				evalSession!.extensionRunner.getExtensionPaths().length,
 				0,
 				"Expected an isolated eval session to start without extensions",
 			);
@@ -140,19 +143,19 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 			let response: string | undefined;
 			for (const step of steps) {
 				if (step.type === "prompt") {
-					response = await promptAgent(evalSession, step.content, signal);
+					response = await promptAgent(evalSession!, step.content, signal);
 				} else {
-					await evalSession.reload();
+					await evalSession!.reload();
 				}
 			}
 			if (response === undefined) throw new Error("Pi eval input must include at least one prompt step.");
-			const output = "output" in options ? await options.output({ response, session: evalSession }) : response;
-			const stats = evalSession.getSessionStats();
+			const output = "output" in options ? await options.output({ response, session: evalSession! }) : response;
+			const stats = evalSession!.getSessionStats();
 			outcome = {
 				success: true,
 				result: {
 					output,
-					events: toTranscriptEvents(evalSession.messages),
+					events: toTranscriptEvents(evalSession!.messages),
 					usage: {
 						provider: model.provider,
 						model: model.id,

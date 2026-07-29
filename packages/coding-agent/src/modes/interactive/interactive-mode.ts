@@ -72,22 +72,14 @@ import type {
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
-import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
-import {
-	defaultModelPerProvider,
-	findExactModelReferenceMatch,
-	resolveModelScope,
-	resolveModelScopeWithDiagnostics,
-} from "../../core/model-resolver.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { type SessionEntry, SessionManager, sessionEntryToContextMessages } from "../../core/session-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
-import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { getUsageCostBreakdown } from "../../core/usage-totals.ts";
@@ -96,10 +88,8 @@ import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
 import { parseGitUrl } from "../../utils/git.ts";
 import { getCwdRelativePath } from "../../utils/paths.ts";
-import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
-import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
@@ -240,10 +230,6 @@ export function formatResumeCommand(sessionManager: SessionManager): string | un
 	}
 	args.push("--session", sessionManager.getSessionId());
 	return args.join(" ");
-}
-
-function hasDefaultModelProvider(providerId: string): providerId is keyof typeof defaultModelPerProvider {
-	return providerId in defaultModelPerProvider;
 }
 
 type LoginProviderCompletionOption = {
@@ -837,13 +823,6 @@ export class InteractiveMode {
 				.then(() => this.updateAvailableProviderCount())
 				.catch(() => {});
 		}
-
-		// Start version check asynchronously
-		checkForNewPiVersion(this.version).then((newRelease) => {
-			if (newRelease) {
-				this.showNewVersionNotification(newRelease);
-			}
-		});
 
 		// Start package update check asynchronously
 		this.checkForPackageUpdates()
@@ -3182,7 +3161,7 @@ export class InteractiveMode {
 			typeof message.content === "string"
 				? [{ type: "text", text: message.content }]
 				: message.content.filter((c: { type: string }) => c.type === "text");
-		return textBlocks.map((c) => (c as { text: string }).text).join("");
+		return textBlocks.map((c: { text: string }) => c.text).join("");
 	}
 
 	/**
@@ -4508,10 +4487,12 @@ export class InteractiveMode {
 
 		if (hasSessionScope) {
 			// Use current session's scoped models
-			currentEnabledIds = sessionScopedModels.map((scoped) => `${scoped.model.provider}/${scoped.model.id}`);
+			currentEnabledIds = sessionScopedModels.map(
+				(scoped: { model: { provider: string; id: string } }) => `${scoped.model.provider}/${scoped.model.id}`,
+			);
 		} else if (configuredScope) {
 			currentEnabledIds = configuredScope.scopedModels.map(
-				(scoped) => `${scoped.model.provider}/${scoped.model.id}`,
+				(scoped: { model: { provider: string; id: string } }) => `${scoped.model.provider}/${scoped.model.id}`,
 			);
 		}
 
@@ -4530,7 +4511,7 @@ export class InteractiveMode {
 			if (enabledIds && hasEnabledAvailableModel && !allAvailableModelsEnabled) {
 				const newScopedModels = await resolveModelScope(enabledIds, this.session.modelRuntime);
 				this.session.setScopedModels(
-					newScopedModels.map((sm) => ({
+					newScopedModels.map((sm: { model: Model; thinkingLevel?: string }) => ({
 						model: sm.model,
 						thinkingLevel: sm.thinkingLevel,
 					})),

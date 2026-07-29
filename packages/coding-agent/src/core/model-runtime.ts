@@ -31,21 +31,7 @@ import {
 } from "@earendil-works/pi-ai";
 import * as builtinProviderCatalog from "@earendil-works/pi-ai/providers/all";
 import { getAgentDir } from "../config.ts";
-import { AuthStorage as DefaultAuthStorage } from "./auth-storage.ts";
 import { ModelConfig } from "./model-config.ts";
-import { FileModelsStore, InMemoryCodingAgentModelsStore } from "./models-store.ts";
-import {
-	type AuthStatus,
-	type CompatibilityRequestConfig,
-	composeModelProvider,
-	configuredRequestAuthStatus,
-	type ProviderConfigInput,
-	resolveCompatibilityRequestConfig,
-	resolveConfiguredModelHeaders,
-	validateExtensionProvider,
-} from "./provider-composer.ts";
-import { withRemoteCatalog } from "./remote-catalog-provider.ts";
-import { RuntimeCredentials } from "./runtime-credentials.ts";
 
 interface ModelRuntimeSnapshot {
 	all: readonly Model<Api>[];
@@ -270,7 +256,7 @@ export class ModelRuntime implements Models {
 	}
 
 	private queueAvailabilityRefresh(after: Promise<void> | undefined): Promise<void> {
-		const refresh = (after ?? Promise.resolve()).catch(() => {}).then(() => this.runAvailabilityRefresh());
+		const refresh = (after ?? Promise.resolve()).catch(() => { }).then(() => this.runAvailabilityRefresh());
 		const recorded = refresh.catch((error) => {
 			this.availabilityError = error instanceof Error ? error.message : String(error);
 			throw error;

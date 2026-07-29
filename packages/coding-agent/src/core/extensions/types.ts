@@ -53,8 +53,6 @@ import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
 import type { KeybindingsManager } from "../keybindings.ts";
 import type { CustomMessage } from "../messages.ts";
-import type { ModelRegistry } from "../model-registry.ts";
-import type { ScopedModel } from "../model-resolver.ts";
 import type {
 	BranchSummaryEntry,
 	CompactionEntry,
@@ -1497,12 +1495,12 @@ export type ExtensionFactory = (pi: ExtensionAPI) => void | Promise<void>;
 export type InlineExtension =
 	| ExtensionFactory
 	| {
-			/** Display name shown as `<inline:name>` in the startup Extensions list. */
-			name: string;
-			factory: ExtensionFactory;
-			/** Omit this extension from the startup Extensions list. */
-			hidden?: boolean;
-	  };
+		/** Display name shown as `<inline:name>` in the startup Extensions list. */
+		name: string;
+		factory: ExtensionFactory;
+		/** Omit this extension from the startup Extensions list. */
+		hidden?: boolean;
+	};
 
 // ============================================================================
 // Loaded Extension Types
@@ -1664,7 +1662,7 @@ export interface ExtensionCommandContextActions {
  * Full runtime = state + actions.
  * Created by loader with throwing action stubs, completed by runner.initialize().
  */
-export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionActions {}
+export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionActions { }
 
 /** Loaded extension with all registered items. */
 export interface Extension {

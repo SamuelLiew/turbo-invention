@@ -25,9 +25,9 @@ export type ChatTemplateKwargValue =
 	| boolean
 	| null
 	| {
-		$var: "thinking.enabled" | "thinking.effort";
-		omitWhenOff?: boolean;
-	};
+			$var: "thinking.enabled" | "thinking.effort";
+			omitWhenOff?: boolean;
+	  };
 
 export interface ThinkingBudgets {
 	minimal?: number;
@@ -239,13 +239,13 @@ export type GrammarVariants = Partial<Record<GrammarFormat, string>>;
 
 export type ConstrainedSamplingConfig =
 	| {
-		type: "json_schema";
-		strict: "prefer" | "require";
-	}
+			type: "json_schema";
+			strict: "prefer" | "require";
+	  }
 	| {
-		type: "grammar";
-		variants: GrammarVariants;
-	};
+			type: "grammar";
+			variants: GrammarVariants;
+	  };
 
 export interface Tool<TParameters extends TSchema = TSchema> {
 	name: string;
@@ -285,16 +285,16 @@ export interface OpenAICompletionsCompat {
 	requiresThinkingAsText?: boolean;
 	requiresReasoningContentOnAssistantMessages?: boolean;
 	thinkingFormat?:
-	| "openai"
-	| "openrouter"
-	| "deepseek"
-	| "together"
-	| "zai"
-	| "qwen"
-	| "chat-template"
-	| "qwen-chat-template"
-	| "string-thinking"
-	| "ant-ling";
+		| "openai"
+		| "openrouter"
+		| "deepseek"
+		| "together"
+		| "zai"
+		| "qwen"
+		| "chat-template"
+		| "qwen-chat-template"
+		| "string-thinking"
+		| "ant-ling";
 	chatTemplateKwargs?: Record<string, ChatTemplateKwargValue>;
 	openRouterRouting?: OpenRouterRouting;
 	vercelGatewayRouting?: VercelGatewayRouting;
@@ -341,11 +341,11 @@ export interface OpenRouterRouting {
 	ignore?: string[];
 	quantizations?: string[];
 	sort?:
-	| string
-	| {
-		by?: string;
-		partition?: string | null;
-	};
+		| string
+		| {
+				by?: string;
+				partition?: string | null;
+		  };
 	max_price?: {
 		prompt?: number | string;
 		completion?: number | string;
@@ -354,21 +354,21 @@ export interface OpenRouterRouting {
 		request?: number | string;
 	};
 	preferred_min_throughput?:
-	| number
-	| {
-		p50?: number;
-		p75?: number;
-		p90?: number;
-		p99?: number;
-	};
+		| number
+		| {
+				p50?: number;
+				p75?: number;
+				p90?: number;
+				p99?: number;
+		  };
 	preferred_max_latency?:
-	| number
-	| {
-		p50?: number;
-		p75?: number;
-		p90?: number;
-		p99?: number;
-	};
+		| number
+		| {
+				p50?: number;
+				p75?: number;
+				p90?: number;
+				p99?: number;
+		  };
 }
 
 export interface VercelGatewayRouting {
@@ -405,12 +405,12 @@ export interface Model<TApi extends Api> {
 	maxTokens: number;
 	headers?: Record<string, string>;
 	compat?: TApi extends "openai-completions"
-	? OpenAICompletionsCompat
-	: TApi extends "openai-responses" | "azure-openai-responses" | "openai-codex-responses"
-	? OpenAIResponsesCompat
-	: TApi extends "anthropic-messages"
-	? AnthropicMessagesCompat
-	: never;
+		? OpenAICompletionsCompat
+		: TApi extends "openai-responses" | "azure-openai-responses" | "openai-codex-responses"
+			? OpenAIResponsesCompat
+			: TApi extends "anthropic-messages"
+				? AnthropicMessagesCompat
+				: never;
 }
 
 export interface ImagesModel<TApi extends ImagesApi>
