@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Qwen3 MLX Inference Engine — stdio NDJSON protocol for pi
+Qwen3 MLX Inference Engine — OpenAI-compatible stdio protocol for pi
 """
 
 import os
@@ -8,6 +8,7 @@ import sys
 import time
 import json
 import copy
+import uuid
 import inspect
 
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -20,7 +21,6 @@ except Exception:
 import numpy as np
 import mlx.core as mx
 from mlx_lm import load, stream_generate
-from mlx_embeddings.utils import load as load_embeddings
 
 # --- Hardcoded to your Kaggle cache ---
 MODEL_PATH = os.environ.get(
@@ -28,7 +28,7 @@ MODEL_PATH = os.environ.get(
     "/Users/coda/.cache/kagglehub/models/coolgamerz/qwen3-6-27b-4bitmlx/other/default/1"
 )
 
-# --- Optional BGE / RAG (won't crash if missing) ---
+# --- Optional BGE / RAG ---
 EMBED_PATH = os.environ.get("OPENCODE_BGE_EMBED_PATH", "")
 VECTORS_FILE = os.environ.get("OPENCODE_VECTORS_FILE", "")
 METADATA_FILE = os.environ.get("OPENCODE_METADATA_FILE", "")
@@ -47,21 +47,20 @@ sys.stderr.flush()
 config_path = os.path.join(MODEL_PATH, "config.json")
 if not os.path.exists(config_path):
     err = f"config.json not found at {MODEL_PATH}"
-    print(json.dumps({"type": "error", "error": err}), file=sys.stdout)
+    print(json.dumps({"error": {"message": err, "type": "engine_error"}}), file=sys.stdout)
     sys.stdout.flush()
-    print(f"[!] {err}", file=sys.stderr)
     sys.exit(1)
 
 try:
     t0 = time.time()
     model, tokenizer = load(MODEL_PATH)
     print(f"[*] Loaded LLM in {time.time()-t0:.2f}s", file=sys.stderr)
+    print(f"[*] Default MLX device: {mx.default_device()}", file=sys.stderr)
     sys.stderr.flush()
 except Exception as e:
     err = f"Failed to load model: {e}"
-    print(json.dumps({"type": "error", "error": err}), file=sys.stdout)
+    print(json.dumps({"error": {"message": err, "type": "engine_error"}}), file=sys.stdout)
     sys.stdout.flush()
-    print(f"[!] {err}", file=sys.stderr)
     sys.exit(1)
 
 # --- Optional embeddings ---
@@ -72,6 +71,7 @@ code_vault = None
 
 if EMBED_PATH and os.path.exists(os.path.join(EMBED_PATH, "config.json")):
     try:
+        from mlx_embeddings.utils import load as load_embeddings
         t0 = time.time()
         embed_model, embed_tokenizer = load_embeddings(EMBED_PATH)
         print(f"[*] Loaded BGE in {time.time()-t0:.2f}s", file=sys.stderr)
@@ -146,7 +146,7 @@ def format_tools_manual(tools: list) -> str:
         "\n# Tools",
         "You may call one or more tools by writing a <tool_call> block:",
         "",
-        '<tool_call>{"name": "TOOL_NAME", "arguments": {"arg1": "value1"}}</tool_call>',
+        '{"name": "TOOL_NAME", "arguments": {"arg1": "value1"}}',
         "",
         "\nAvailable tools:"
     ]
@@ -154,7 +154,7 @@ def format_tools_manual(tools: list) -> str:
         fn = tool.get("function", {})
         lines.append(f"\n- {fn.get('name')}: {fn.get('description', '')}")
         lines.append(f"  Parameters: {json.dumps(fn.get('parameters', {}))}")
-    lines.append("\nIf no tool is needed, respond normally.")
+        lines.append("\nIf no tool is needed, respond normally.")
     return "\n".join(lines)
 
 
@@ -246,18 +246,7 @@ def extract_tool_calls(text: str, id_offset: int = 0):
     return "".join(clean_parts).strip(), tool_calls, None
 
 
-def validate_request(req: dict) -> tuple[bool, str]:
-    if not isinstance(req, dict):
-        return False, "Request must be a JSON object"
-    if "messages" not in req:
-        return False, "Missing 'messages' field"
-    if not isinstance(req.get("messages"), list):
-        return False, "'messages' must be an array"
-    return True, ""
-
-
-SAMPLER_KWARG_ALIASES = {"temp": ("temp", "temperature")}
-
+# --- Sampler compatibility layer ---
 def _accepted_kwargs(fn):
     try:
         params = inspect.signature(fn).parameters
@@ -269,50 +258,95 @@ def _accepted_kwargs(fn):
 
 def _resolve_kwarg(fn, canonical: str) -> str | None:
     accepted = _accepted_kwargs(fn)
-    for name in SAMPLER_KWARG_ALIASES.get(canonical, (canonical,)):
+    for name in (canonical,):
         if accepted is None or name in accepted:
             return name
     return None
 
-def _warn_unsupported(param: str, target: str) -> None:
-    print(f"[!] Installed mlx-lm does not support '{param}' via {target}; ignoring it.", file=sys.stderr)
-    sys.stderr.flush()
-
-def build_generate_kwargs(prompt: str, max_tokens: int, temp, top_p, repetition_penalty) -> dict:
-    kwargs = {"prompt": prompt, "max_tokens": max_tokens}
+def build_sampler(temp, top_p):
+    """Build a sampler compatible with the installed mlx-lm version."""
     try:
         from mlx_lm import sample_utils
     except ImportError:
         sample_utils = None
 
-    requested = {name: value for name, value in (("temp", temp), ("top_p", top_p)) if value is not None}
     make_sampler = getattr(sample_utils, "make_sampler", None)
-    if requested and make_sampler is not None and _resolve_kwarg(stream_generate, "sampler"):
+    if make_sampler is not None:
         sampler_kwargs = {}
-        for name, value in requested.items():
-            resolved = _resolve_kwarg(make_sampler, name)
+        if temp is not None:
+            resolved = _resolve_kwarg(make_sampler, "temp")
             if resolved:
-                sampler_kwargs[resolved] = value
+                sampler_kwargs[resolved] = temp
             else:
-                _warn_unsupported(name, "make_sampler")
-        kwargs["sampler"] = make_sampler(**sampler_kwargs)
+                print("[!] make_sampler does not support 'temp'", file=sys.stderr)
+        if top_p is not None:
+            resolved = _resolve_kwarg(make_sampler, "top_p")
+            if resolved:
+                sampler_kwargs[resolved] = top_p
+            else:
+                print("[!] make_sampler does not support 'top_p'", file=sys.stderr)
+        if sampler_kwargs:
+            return make_sampler(**sampler_kwargs)
+    return None
+
+def build_generate_kwargs(prompt: str, max_tokens: int, temp, top_p, repetition_penalty=None):
+    kwargs = {"prompt": prompt, "max_tokens": max_tokens}
+
+    sampler = build_sampler(temp, top_p)
+    if sampler is not None and _resolve_kwarg(stream_generate, "sampler"):
+        kwargs["sampler"] = sampler
     else:
-        for name, value in requested.items():
-            resolved = _resolve_kwarg(stream_generate, name)
+        # Fall back to direct kwargs on stream_generate
+        if temp is not None:
+            resolved = _resolve_kwarg(stream_generate, "temp")
             if resolved:
-                kwargs[resolved] = value
+                kwargs[resolved] = temp
             else:
-                _warn_unsupported(name, "stream_generate")
+                print("[!] stream_generate does not support 'temp'; ignoring.", file=sys.stderr)
+        if top_p is not None:
+            resolved = _resolve_kwarg(stream_generate, "top_p")
+            if resolved:
+                kwargs[resolved] = top_p
+            else:
+                print("[!] stream_generate does not support 'top_p'; ignoring.", file=sys.stderr)
 
     if repetition_penalty is not None:
-        make_logits_processors = getattr(sample_utils, "make_logits_processors", None)
+        try:
+            from mlx_lm import sample_utils
+            make_logits_processors = getattr(sample_utils, "make_logits_processors", None)
+        except ImportError:
+            make_logits_processors = None
+
         if make_logits_processors is not None and _resolve_kwarg(stream_generate, "logits_processors"):
             kwargs["logits_processors"] = make_logits_processors(repetition_penalty=repetition_penalty)
         elif _resolve_kwarg(stream_generate, "repetition_penalty"):
             kwargs["repetition_penalty"] = repetition_penalty
         else:
-            _warn_unsupported("repetition_penalty", "stream_generate")
+            print("[!] repetition_penalty not supported; ignoring.", file=sys.stderr)
+
     return kwargs
+
+
+def _send_chunk(content: str = "", tool_calls=None, finish_reason=None, model_id="local-llm"):
+    delta = {}
+    if content:
+        delta["content"] = content
+    if tool_calls:
+        delta["tool_calls"] = tool_calls
+
+    resp = {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model_id,
+        "choices": [{
+            "index": 0,
+            "delta": delta,
+            "finish_reason": finish_reason
+        }]
+    }
+    sys.stdout.write(json.dumps(resp) + "\n")
+    sys.stdout.flush()
 
 
 # --- Main IPC loop ---
@@ -323,26 +357,28 @@ while True:
     line = sys.stdin.readline()
     if not line:
         break
+
     try:
         req = json.loads(line)
     except json.JSONDecodeError as e:
-        sys.stdout.write(json.dumps({"type": "error", "error": f"Invalid JSON: {e}"}) + "\n")
-        sys.stdout.flush()
+        _send_chunk(finish_reason="stop")
         continue
 
-    request_id = req.get("request_id", "")
-    ok, err_msg = validate_request(req)
-    if not ok:
-        sys.stdout.write(json.dumps({"type": "error", "error": err_msg, "request_id": request_id}) + "\n")
-        sys.stdout.flush()
+    # OpenAI-compatible request fields
+    messages = req.get("messages", [])
+    tools = req.get("tools", [])
+    model_id = req.get("model", "local-llm")
+    max_tokens = req.get("max_tokens", 8192)
+    temp = req.get("temperature", 0.7)
+    top_p = req.get("top_p", 1.0)
+    repetition_penalty = req.get("repetition_penalty")
+
+    if not messages:
+        _send_chunk(finish_reason="stop", model_id=model_id)
         continue
 
     try:
-        messages = copy.deepcopy(req.get("messages", []))
-        tools = req.get("tools", [])
-        max_tokens = req.get("max_tokens", 8192)
-        temp = req.get("temperature", 0.7)
-
+        # --- RAG injection ---
         for i in range(len(messages) - 1, -1, -1):
             if messages[i].get("role") == "user":
                 raw = messages[i].get("content", "")
@@ -356,7 +392,9 @@ while True:
                 break
 
         prompt_str = build_prompt(tokenizer, messages, tools)
-        generate_kwargs = build_generate_kwargs(prompt_str, max_tokens, temp, req.get("top_p"), req.get("repetition_penalty"))
+
+        # --- Generation ---
+        generate_kwargs = build_generate_kwargs(prompt_str, max_tokens, temp, top_p, repetition_penalty)
 
         t_gen_start = time.time()
         t_first_token = None
@@ -364,8 +402,6 @@ while True:
 
         buffer = ""
         processed_pos = 0
-        in_tool = False
-        tool_start_pos = 0
         emitted_tool_calls = 0
         eos_ids = [tokenizer.eos_token_id]
         if hasattr(tokenizer, "pad_token_id") and tokenizer.pad_token_id is not None:
@@ -375,6 +411,9 @@ while True:
             if t_first_token is None:
                 t_first_token = time.time()
                 print(f"[*] TTFT: {(t_first_token - t_gen_start) * 1000:.1f}ms", file=sys.stderr)
+                sys.stderr.flush()
+                # OpenAI protocol: emit empty delta with role first
+                _send_chunk(content="", model_id=model_id)
 
             token_text = chunk.text
             buffer += token_text
@@ -382,90 +421,49 @@ while True:
             if hasattr(chunk, "token") and chunk.token in eos_ids:
                 break
 
-            while True:
-                if not in_tool:
-                    tag_start = buffer.find("<tool_call>", processed_pos)
-                    if tag_start == -1:
-                        new_text = buffer[processed_pos:]
-                        if new_text:
-                            sys.stdout.write(json.dumps({"type": "text", "text": new_text, "request_id": request_id}) + "\n")
-                            sys.stdout.flush()
-                        processed_pos = len(buffer)
-                        break
-                    else:
-                        text_before = buffer[processed_pos:tag_start]
-                        if text_before:
-                            sys.stdout.write(json.dumps({"type": "text", "text": text_before, "request_id": request_id}) + "\n")
-                            sys.stdout.flush()
-                        in_tool = True
-                        tool_start_pos = tag_start
-                        processed_pos = tag_start
-                else:
-                    tag_end = buffer.find("</tool_call>", tool_start_pos)
-                    if tag_end == -1:
-                        break
-                    complete_block = buffer[tool_start_pos:tag_end + len("</tool_call>")]
-                    clean, tcs, err = extract_tool_calls(complete_block, emitted_tool_calls)
-                    if err:
-                        sys.stdout.write(json.dumps({"type": "error", "error": err, "request_id": request_id}) + "\n")
-                        sys.stdout.flush()
-                        raise RuntimeError(err)
-                    for tc in tcs:
-                        sys.stdout.write(json.dumps({
-                            "type": "tool_call",
-                            "id": tc["id"],
-                            "name": tc["function"]["name"],
-                            "arguments": json.dumps(tc["function"]["arguments"]),
-                            "request_id": request_id
-                        }) + "\n")
-                        sys.stdout.flush()
-                    emitted_tool_calls += len(tcs)
-                    in_tool = False
-                    processed_pos = tag_end + len("</tool_call>")
+            # Stream word-by-word to balance latency vs throughput
+            last_space = buffer.rfind(' ', processed_pos)
+            if last_space != -1 and last_space > processed_pos:
+                word = buffer[processed_pos:last_space + 1]
+                _send_chunk(content=word, model_id=model_id)
+                processed_pos = last_space + 1
 
-        t_gen_end = time.time()
-        gen_duration = t_gen_end - t_gen_start
-
-        if in_tool:
-            sys.stdout.write(json.dumps({"type": "error", "error": "Model ended generation inside a <tool_call> tag", "request_id": request_id}) + "\n")
-            sys.stdout.flush()
-        elif processed_pos < len(buffer):
+        # --- Flush remainder ---
+        if processed_pos < len(buffer):
             tail = buffer[processed_pos:]
-            clean_text, final_tcs, err = extract_tool_calls(tail, emitted_tool_calls)
+            clean_text, tcs, err = extract_tool_calls(tail, emitted_tool_calls)
             if err:
-                sys.stdout.write(json.dumps({"type": "error", "error": err, "request_id": request_id}) + "\n")
-                sys.stdout.flush()
-            else:
-                remainder = clean_text if final_tcs else tail
-                if remainder:
-                    sys.stdout.write(json.dumps({"type": "text", "text": remainder, "request_id": request_id}) + "\n")
-                    sys.stdout.flush()
-                for tc in final_tcs:
-                    sys.stdout.write(json.dumps({
-                        "type": "tool_call",
-                        "id": tc["id"],
-                        "name": tc["function"]["name"],
-                        "arguments": json.dumps(tc["function"]["arguments"]),
-                        "request_id": request_id
-                    }) + "\n")
-                    sys.stdout.flush()
+                print(f"[!] Tool parse error: {err}", file=sys.stderr)
+                clean_text = tail
+            if tcs:
+                for tc in tcs:
+                    _send_chunk(
+                        tool_calls=[{
+                            "index": 0,
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc["function"]["name"],
+                                "arguments": json.dumps(tc["function"]["arguments"])
+                            }
+                        }],
+                        model_id=model_id
+                    )
+                emitted_tool_calls += len(tcs)
+            if clean_text:
+                _send_chunk(content=clean_text, model_id=model_id)
+
+        # --- Final chunk ---
+        _send_chunk(finish_reason="stop", model_id=model_id)
 
         prompt_tokens = len(tokenizer.encode(prompt_str)) if hasattr(tokenizer, "encode") else 0
         completion_tokens = len(tokenizer.encode(buffer)) if hasattr(tokenizer, "encode") else 0
+        gen_duration = time.time() - t_gen_start
         t_speed = completion_tokens / gen_duration if gen_duration > 0 else 0.0
         print(f"[*] Generation: {completion_tokens} tokens in {gen_duration:.2f}s ({t_speed:.1f} tok/s)", file=sys.stderr)
-
-        sys.stdout.write(json.dumps({
-            "type": "done",
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens
-            },
-            "request_id": request_id
-        }) + "\n")
-        sys.stdout.flush()
+        sys.stderr.flush()
 
     except Exception as e:
-        sys.stdout.write(json.dumps({"type": "error", "error": str(e), "request_id": request_id}) + "\n")
-        sys.stdout.flush()
+        print(f"[!] Generation error: {e}", file=sys.stderr)
+        sys.stderr.flush()
+        _send_chunk(content=f"[Engine error: {e}]", finish_reason="stop", model_id=model_id)
