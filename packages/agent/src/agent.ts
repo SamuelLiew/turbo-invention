@@ -1,11 +1,12 @@
-import type {
-	ImageContent,
-	Message,
-	Model,
-	SimpleStreamOptions,
-	TextContent,
-	ThinkingBudgets,
-	Transport,
+import {
+	type ImageContent,
+	type Message,
+	type Model,
+	type SimpleStreamOptions,
+	streamSimple,
+	type TextContent,
+	type ThinkingBudgets,
+	type Transport,
 } from "@earendil-works/pi-ai";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
 import type {
@@ -97,7 +98,7 @@ export interface AgentOptions {
 	initialState?: Partial<Omit<AgentState, "pendingToolCalls" | "isStreaming" | "streamingMessage" | "errorMessage">>;
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
-	streamFn: StreamFn;
+	streamFn?: StreamFn;
 	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	onPayload?: SimpleStreamOptions["onPayload"];
 	onResponse?: SimpleStreamOptions["onResponse"];
@@ -212,7 +213,7 @@ export class Agent {
 		this._state = createMutableAgentState(runtimeOptions.initialState);
 		this.convertToLlm = runtimeOptions.convertToLlm ?? defaultConvertToLlm;
 		this.transformContext = runtimeOptions.transformContext;
-		this.streamFunction = runtimeOptions.streamFn ?? getDefaultStreamFn();
+		this.streamFunction = runtimeOptions.streamFn ?? streamSimple;
 		this.getApiKey = runtimeOptions.getApiKey;
 		this.onPayload = runtimeOptions.onPayload;
 		this.onResponse = runtimeOptions.onResponse;
@@ -447,11 +448,11 @@ export class Agent {
 			prepareNextTurn:
 				this.prepareNextTurnWithContext || this.prepareNextTurn
 					? async (context) => {
-						if (this.prepareNextTurnWithContext) {
-							return await this.prepareNextTurnWithContext(context, this.signal);
+							if (this.prepareNextTurnWithContext) {
+								return await this.prepareNextTurnWithContext(context, this.signal);
+							}
+							return await this.prepareNextTurn?.(this.signal);
 						}
-						return await this.prepareNextTurn?.(this.signal);
-					}
 					: undefined,
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
@@ -473,7 +474,7 @@ export class Agent {
 		}
 
 		const abortController = new AbortController();
-		let resolvePromise = () => { };
+		let resolvePromise = () => {};
 		const promise = new Promise<void>((resolve) => {
 			resolvePromise = resolve;
 		});

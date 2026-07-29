@@ -14,9 +14,15 @@ Usage:
 import argparse
 import json
 import os
+import re
+import ssl
 import sys
 
 os.environ["HF_HUB_OFFLINE"] = "1"
+try:
+    ssl._create_default_https_context = ssl._create_unverified_context
+except Exception:
+    pass
 
 import numpy as np
 import mlx.core as mx
@@ -58,6 +64,24 @@ def iter_source_files(root: str):
             yield full
 
 
+def extract_behavioral_anchors(content: str, ext: str) -> str:
+    anchors = []
+    lines = content.splitlines()
+    if ext == ".py":
+        for line in lines[:25]:
+            if line.startswith(("import ", "from ", "class ", "def ")):
+                anchors.append(line.strip())
+    elif ext in [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]:
+        for line in lines[:25]:
+            if line.startswith(("import ", "export ", "class ", "function ", "interface ", "type ")):
+                anchors.append(line.strip())
+    elif ext in [".yaml", ".yml", ".json"]:
+        for line in lines[:15]:
+            if re.match(r"^[a-zA-Z0-9_-]+:", line):
+                anchors.append(line.split(":")[0].strip())
+    return ", ".join(anchors[:8]) if anchors else "Module logic"
+
+
 def chunk_text(text: str):
     return [text[i:i + CHUNK_CHARS] for i in range(0, len(text), CHUNK_CHARS)] or [""]
 
@@ -94,9 +118,15 @@ def main() -> int:
             continue
 
         rel = os.path.relpath(path, args.root)
-        for index, chunk in enumerate(chunk_text(content)):
-            vectors.append(embed(model, tokenizer, chunk))
-            metadata.append({"file": rel, "chunk": index, "text": chunk})
+        ext = os.path.splitext(path)[1].lower()
+        file_summary = extract_behavioral_anchors(content, ext)
+        chunks = chunk_text(content)
+
+        for index, chunk in enumerate(chunks):
+            header = f"// Location: {rel} | Part: {index+1}/{len(chunks)}\n// Context: {file_summary}\n"
+            enriched = header + chunk
+            vectors.append(embed(model, tokenizer, enriched))
+            metadata.append({"file": rel, "chunk": index, "text": enriched})
 
         print(f"[+] {rel}", file=sys.stderr)
 

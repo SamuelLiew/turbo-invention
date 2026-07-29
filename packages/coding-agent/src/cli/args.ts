@@ -42,6 +42,9 @@ export interface Args {
 	noContextFiles?: boolean;
 	verbose?: boolean;
 	projectTrustOverride?: boolean;
+	provider?: string;
+	model?: string;
+	offline?: boolean;
 	messages: string[];
 	fileArgs: string[];
 	/** Unknown flags (potentially extension flags) - map of flag name to value */
@@ -163,6 +166,12 @@ export function parseArgs(args: string[]): Args {
 			result.projectTrustOverride = true;
 		} else if (arg === "--no-approve" || arg === "-na") {
 			result.projectTrustOverride = false;
+		} else if (arg === "--provider" && i + 1 < args.length) {
+			result.provider = args[++i];
+		} else if (arg === "--model" && i + 1 < args.length) {
+			result.model = args[++i];
+		} else if (arg === "--offline") {
+			result.offline = true;
 		} else if (arg.startsWith("@")) {
 			result.fileArgs.push(arg.slice(1));
 		} else if (arg.startsWith("--")) {

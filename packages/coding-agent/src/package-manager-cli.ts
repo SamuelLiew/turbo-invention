@@ -12,7 +12,7 @@ import { SettingsManager } from "./core/settings-manager.ts";
 
 async function main(): Promise<void> {
 	const args = parseArgs(process.argv.slice(2));
-	const settings = new SettingsManager();
+	const settings = SettingsManager.create(process.cwd());
 
 	if (args.help || args.messages.length === 0) {
 		console.log(`${APP_NAME} package manager

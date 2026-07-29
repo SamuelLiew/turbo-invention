@@ -21,7 +21,10 @@ export {
 	type AgentSessionRuntimeDiagnostic,
 	type AgentSessionServices,
 	type CreateAgentSessionFromServicesOptions,
+	type CreateAgentSessionOptions,
+	type CreateAgentSessionResult,
 	type CreateAgentSessionServicesOptions,
+	createAgentSession,
 	createAgentSessionFromServices,
 	createAgentSessionServices,
 } from "./agent-session-services.ts";

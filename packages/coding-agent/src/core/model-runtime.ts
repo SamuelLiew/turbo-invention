@@ -1,4 +1,5 @@
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
 	type Api,
 	type ApiStreamOptions,
@@ -62,6 +63,107 @@ export interface ModelRuntimeAuthOverrides {
 	minOAuthValidityMs?: number;
 }
 
+export type ScopedModel = { model: Model<any>; thinkingLevel?: ThinkingLevel };
+
+export interface ProviderConfigInput {
+	id?: string;
+	name?: string;
+	baseUrl?: string;
+	apiKey?: string;
+	oauth?: any;
+	models?: any[];
+}
+
+export interface CompatibilityRequestConfig {
+	baseUrl?: string;
+	apiKey?: string;
+}
+
+export interface AuthStatus {
+	configured: boolean;
+	source?: string;
+	label?: string;
+}
+
+export class RuntimeCredentials implements CredentialStore {
+	private keys = new Map<string, string>();
+	store?: CredentialStore;
+
+	constructor(store?: CredentialStore) {
+		this.store = store;
+	}
+
+	async get(providerId: string) {
+		const key = this.keys.get(providerId);
+		if (key) return { type: "api_key" as const, apiKey: key };
+		if (this.store) return this.store.read(providerId);
+		return undefined;
+	}
+
+	async read(providerId: string) {
+		const key = this.keys.get(providerId);
+		if (key) return { type: "api_key" as const, apiKey: key };
+		if (this.store) return this.store.read(providerId);
+		return undefined;
+	}
+
+	async modify(
+		providerId: string,
+		fn: (current: Credential | undefined) => Promise<Credential | undefined>,
+	): Promise<Credential | undefined> {
+		if (this.store) return this.store.modify(providerId, fn);
+		return undefined;
+	}
+
+	async delete(providerId: string) {
+		this.keys.delete(providerId);
+		if (this.store) await this.store.delete(providerId);
+	}
+
+	async list(): Promise<readonly CredentialInfo[]> {
+		if (this.store) return this.store.list();
+		return [];
+	}
+
+	setRuntimeApiKey(providerId: string, apiKey: string) {
+		this.keys.set(providerId, apiKey);
+	}
+
+	removeRuntimeApiKey(providerId: string) {
+		this.keys.delete(providerId);
+	}
+
+	hasRuntimeApiKey(providerId: string) {
+		return this.keys.has(providerId);
+	}
+}
+
+function resolveCompatibilityRequestConfig(
+	model: Model<Api>,
+	providerConfig?: any,
+	extensionConfig?: any,
+): CompatibilityRequestConfig {
+	return {
+		baseUrl: extensionConfig?.baseUrl ?? providerConfig?.baseUrl ?? model.baseUrl,
+		apiKey: extensionConfig?.apiKey ?? providerConfig?.apiKey,
+	};
+}
+
+function resolveConfiguredModelHeaders(
+	_model: Model<Api>,
+	_providerConfig?: any,
+	_extensionConfig?: any,
+	_env?: Record<string, string>,
+): ProviderHeaders | undefined {
+	return undefined;
+}
+
+function configuredRequestAuthStatus(_providerConfig?: any, _extensionConfig?: any): AuthStatus | undefined {
+	return { configured: true, source: "stdio-local" };
+}
+
+function validateExtensionProvider(_providerId: string, _builtin?: any, _config?: any, _input?: any): void {}
+
 function mergeHeaders(
 	base: ProviderHeaders | undefined,
 	override: ProviderHeaders | undefined,
@@ -119,61 +221,40 @@ export class ModelRuntime implements Models {
 	}
 
 	static async create(options: CreateModelRuntimeOptions = {}): Promise<ModelRuntime> {
-		const credentials = new RuntimeCredentials(options.credentials ?? DefaultAuthStorage.create(options.authPath));
+		const credentials = new RuntimeCredentials(options.credentials);
 		const modelsPath =
 			options.modelsPath === null ? undefined : (options.modelsPath ?? join(getAgentDir(), "models.json"));
 		const config = await ModelConfig.load(modelsPath);
-		const modelsStore =
-			options.modelsStore ??
-			(modelsPath
-				? new FileModelsStore(options.modelsStorePath ?? join(dirname(modelsPath), "models-store.json"))
-				: new InMemoryCodingAgentModelsStore());
-		const builtinModelDataGeneratedAt = builtinProviderCatalog.getBuiltinModelDataGeneratedAt();
-		const providers = builtinProviderCatalog
-			.builtinProviders()
-			.map((provider) =>
-				provider.id === "radius"
-					? provider
-					: withRemoteCatalog(provider, options.catalogBaseUrl, builtinModelDataGeneratedAt),
-			);
-		const runtime = new ModelRuntime(
-			credentials,
-			config,
-			modelsPath,
-			modelsStore,
-			providers,
-			process.env.PI_OFFLINE === undefined,
-		);
-		runtime.configureRadiusProviders();
+		const modelsStore = options.modelsStore ?? ({} as any);
+		const providers = builtinProviderCatalog.builtinProviders();
+		const runtime = new ModelRuntime(credentials, config, modelsPath, modelsStore, providers, false);
 		runtime.rebuildProviders();
-		const refreshFromNetwork = runtime.modelNetworkEnabled && options.allowModelNetwork === true;
-		const controller = refreshFromNetwork ? new AbortController() : undefined;
-		const timeout = controller
-			? setTimeout(() => controller.abort(), options.modelRefreshTimeoutMs ?? 15_000)
-			: undefined;
-		try {
-			await runtime.refresh({ allowNetwork: refreshFromNetwork, signal: controller?.signal });
-		} finally {
-			if (timeout) clearTimeout(timeout);
-		}
+		await runtime.refresh({ allowNetwork: false });
 		return runtime;
+	}
+
+	getDefaultModel(): Model<any> {
+		const available = this.getAvailableSnapshot();
+		if (available.length > 0) return available[0];
+		const all = this.getModels();
+		if (all.length > 0) return all[0];
+		return {
+			id: "local-llm",
+			name: "Local LLM (stdio)",
+			api: "stdio-openai",
+			provider: "stdio-local",
+			baseUrl: "python3",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		};
 	}
 
 	private configureRadiusProviders(): void {
 		this.builtins.clear();
 		for (const [providerId, provider] of this.defaultBuiltins) this.builtins.set(providerId, provider);
-		for (const providerId of this.config.getProviderIds()) {
-			const config = this.config.getProvider(providerId);
-			if (config?.oauth !== "radius" || !config.baseUrl) continue;
-			this.builtins.set(
-				providerId,
-				builtinProviderCatalog.radiusProvider({
-					id: providerId,
-					name: config.name ?? providerId,
-					gateway: config.baseUrl.replace(/\/v1\/?$/u, ""),
-				}),
-			);
-		}
 	}
 
 	private providerIds(): Set<string> {
@@ -187,25 +268,11 @@ export class ModelRuntime implements Models {
 
 	private recomposeProvider(providerId: string): void {
 		const base = this.nativeExtensionProviders.get(providerId) ?? this.builtins.get(providerId);
-		const extension = this.extensionProviders.get(providerId);
-		if (!base && !this.config.getProvider(providerId) && !extension) {
-			this.models.deleteProvider(providerId);
-			this.compositionErrors.delete(providerId);
-			return;
-		}
-		if (base && !this.config.getProvider(providerId) && !extension) {
-			// No overlays: use the builtin untouched so its auth/login/stream behavior is exact.
+		if (base) {
 			this.models.setProvider(base);
 			this.compositionErrors.delete(providerId);
-			return;
-		}
-		try {
-			this.models.setProvider(composeModelProvider(providerId, base, this.config, extension));
-			this.compositionErrors.delete(providerId);
-		} catch (error) {
-			this.compositionErrors.set(providerId, error instanceof Error ? error.message : String(error));
-			if (base) this.models.setProvider(base);
-			else this.models.deleteProvider(providerId);
+		} else {
+			this.models.deleteProvider(providerId);
 		}
 	}
 
@@ -239,8 +306,11 @@ export class ModelRuntime implements Models {
 			),
 			this.credentials.list(),
 		]);
-		const auth = new Map(checks);
-		const configuredProviders = new Set(
+		const auth = new Map<string, AuthCheck | undefined>();
+		for (const [key, value] of checks) {
+			auth.set(key, value);
+		}
+		const configuredProviders = new Set<string>(
 			checks
 				.filter((entry): entry is [string, AuthCheck] => entry[1] !== undefined)
 				.map(([providerId]) => providerId),
@@ -249,14 +319,14 @@ export class ModelRuntime implements Models {
 			all: [...this.models.getModels()],
 			available: [...available],
 			configuredProviders,
-			storedProviders: new Set(credentials.map((entry) => entry.providerId)),
+			storedProviders: new Set<string>(credentials.map((entry) => entry.providerId)),
 			auth,
 		};
 		this.availabilityError = undefined;
 	}
 
 	private queueAvailabilityRefresh(after: Promise<void> | undefined): Promise<void> {
-		const refresh = (after ?? Promise.resolve()).catch(() => { }).then(() => this.runAvailabilityRefresh());
+		const refresh = (after ?? Promise.resolve()).catch(() => {}).then(() => this.runAvailabilityRefresh());
 		const recorded = refresh.catch((error) => {
 			this.availabilityError = error instanceof Error ? error.message : String(error);
 			throw error;
@@ -579,3 +649,6 @@ export class ModelRuntime implements Models {
 		void this.refresh({ allowNetwork: false });
 	}
 }
+
+export type ModelRegistry = ModelRuntime;
+export const ModelRegistry = ModelRuntime;

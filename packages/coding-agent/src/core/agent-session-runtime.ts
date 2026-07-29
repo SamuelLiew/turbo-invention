@@ -2,7 +2,11 @@ import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
-import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
+import type {
+	AgentSessionRuntimeDiagnostic,
+	AgentSessionServices,
+	CreateAgentSessionResult,
+} from "./agent-session-services.ts";
 import type {
 	ProjectTrustContext,
 	ReplacedSessionContext,
@@ -434,7 +438,10 @@ export {
 	type AgentSessionRuntimeDiagnostic,
 	type AgentSessionServices,
 	type CreateAgentSessionFromServicesOptions,
+	type CreateAgentSessionOptions,
+	type CreateAgentSessionResult,
 	type CreateAgentSessionServicesOptions,
+	createAgentSession,
 	createAgentSessionFromServices,
 	createAgentSessionServices,
 } from "./agent-session-services.ts";

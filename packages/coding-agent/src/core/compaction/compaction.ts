@@ -10,13 +10,13 @@ import {
 	type Api,
 	type AssistantMessage,
 	type Context,
+	contentText,
 	type Model,
 	type RetryCallbacks,
 	type RetryPolicy,
+	retryAssistantCall,
 	type SimpleStreamOptions,
 	type Usage,
-	contentText,
-	retryAssistantCall,
 	uuidv7,
 } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai/compat";

@@ -1,8 +1,9 @@
 import { join } from "node:path";
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { Agent, type ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
+import { AgentSession } from "./agent-session.ts";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { ModelRuntime } from "./model-runtime.ts";
 import {
@@ -41,6 +42,28 @@ export interface CreateAgentSessionServicesOptions {
 	extensionFlagValues?: Map<string, boolean | string>;
 	resourceLoaderOptions?: Omit<DefaultResourceLoaderOptions, "cwd" | "agentDir" | "settingsManager">;
 	resourceLoaderReloadOptions?: ResourceLoaderReloadOptions;
+}
+
+export interface CreateAgentSessionOptions {
+	cwd?: string;
+	agentDir?: string;
+	sessionManager: SessionManager;
+	modelRuntime?: ModelRuntime;
+	settingsManager?: SettingsManager;
+	resourceLoader?: ResourceLoader;
+	model?: Model<any>;
+	thinkingLevel?: ThinkingLevel;
+	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	tools?: string[];
+	excludeTools?: string[];
+	noTools?: boolean;
+	customTools?: ToolDefinition[];
+	sessionStartEvent?: SessionStartEvent;
+}
+
+export interface CreateAgentSessionResult {
+	session: AgentSession;
+	modelFallbackMessage?: string;
 }
 
 /**
@@ -187,6 +210,49 @@ export async function createAgentSessionServices(
 		resourceLoader,
 		diagnostics,
 	};
+}
+
+export async function createAgentSession(options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> {
+	const services =
+		options.modelRuntime && options.settingsManager && options.resourceLoader
+			? {
+					cwd: resolvePath(options.cwd ?? process.cwd()),
+					agentDir: options.agentDir ? resolvePath(options.agentDir) : getAgentDir(),
+					modelRuntime: options.modelRuntime,
+					settingsManager: options.settingsManager,
+					resourceLoader: options.resourceLoader,
+					diagnostics: [],
+				}
+			: await createAgentSessionServices({
+					cwd: options.cwd ?? process.cwd(),
+					agentDir: options.agentDir,
+					settingsManager: options.settingsManager,
+					modelRuntime: options.modelRuntime,
+				});
+
+	const model = options.model ?? services.modelRuntime.getDefaultModel();
+	const agent = new Agent({
+		initialState: {
+			model,
+			thinkingLevel: options.thinkingLevel ?? "off",
+		},
+	});
+
+	const session = new AgentSession({
+		agent,
+		sessionManager: options.sessionManager,
+		settingsManager: services.settingsManager,
+		cwd: services.cwd,
+		scopedModels: options.scopedModels,
+		resourceLoader: services.resourceLoader,
+		customTools: options.customTools,
+		modelRuntime: services.modelRuntime,
+		initialActiveToolNames: options.tools,
+		excludedToolNames: options.excludeTools,
+		sessionStartEvent: options.sessionStartEvent,
+	});
+
+	return { session };
 }
 
 /**

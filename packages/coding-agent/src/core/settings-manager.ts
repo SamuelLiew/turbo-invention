@@ -1,5 +1,4 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { randomUUID } from "crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
@@ -66,13 +65,13 @@ export type DefaultProjectTrust = "ask" | "always" | "never";
 export type PackageSource =
 	| string
 	| {
-		source: string;
-		autoload?: boolean;
-		extensions?: string[];
-		skills?: string[];
-		prompts?: string[];
-		themes?: string[];
-	};
+			source: string;
+			autoload?: boolean;
+			extensions?: string[];
+			skills?: string[];
+			prompts?: string[];
+			themes?: string[];
+	  };
 
 export interface Settings {
 	defaultProvider?: string;
@@ -1107,4 +1106,73 @@ export class SettingsManager {
 		this.markModified("warnings");
 		this.save();
 	}
+
+	async installExtension(source: string, options?: { local?: boolean }): Promise<void> {
+		const scope = options?.local ? "project" : "global";
+		const current = this.getExtensions(scope);
+		if (!current.includes(source)) {
+			this.setExtensions([...current, source], scope);
+		}
+	}
+
+	async removeExtension(source: string, options?: { local?: boolean }): Promise<void> {
+		const scope = options?.local ? "project" : "global";
+		const current = this.getExtensions(scope);
+		this.setExtensions(
+			current.filter((e) => e !== source),
+			scope,
+		);
+	}
+
+	listExtensions(options?: { local?: boolean }): string[] {
+		const scope = options?.local ? "project" : "global";
+		return this.getExtensions(scope);
+	}
+
+	getExtensions(scope?: "global" | "project"): string[] {
+		if (scope === "global") return this.globalSettings.extensions ?? [];
+		if (scope === "project") return this.projectSettings.extensions ?? [];
+		return this.settings.extensions ?? [];
+	}
+
+	setExtensions(extensions: string[], scope: "global" | "project" = "global"): void {
+		if (scope === "global") {
+			this.globalSettings.extensions = extensions;
+		} else {
+			this.projectSettings.extensions = extensions;
+		}
+		this.settings.extensions = extensions;
+		this.markModified("extensions");
+		this.save();
+	}
+
+	getCollapseChangelog(): boolean {
+		return false;
+	}
+
+	setCollapseChangelog(_val: boolean): void {}
+
+	getLastChangelogVersion(): string | undefined {
+		return undefined;
+	}
+
+	setLastChangelogVersion(_val: string): void {}
+
+	getEnableInstallTelemetry(): boolean {
+		return false;
+	}
+
+	setEnableInstallTelemetry(_val: boolean): void {}
+
+	getTransport(): string {
+		return "std";
+	}
+
+	setTransport(_val: string): void {}
+
+	getHttpIdleTimeoutMs(): number {
+		return 0;
+	}
+
+	setHttpIdleTimeoutMs(_val: number): void {}
 }
